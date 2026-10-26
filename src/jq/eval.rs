@@ -22069,8 +22069,20 @@ fn format_urid<S: EvalSemantics>(value: &OwnedValue, optional: bool) -> Result<S
 /// jq unconditionally double-quotes every string field (inner `"` doubled),
 /// regardless of whether it contains a delimiter — see #306. Shared by
 /// `format_csv` and `format_dsv` so the quoting rule has one definition — see #651.
-fn quote_csv_field(s: &str) -> String {
-    format!("\"{}\"", s.replace('"', "\"\""))
+fn quote_csv_field<S: EvalSemantics>(s: &str) -> String {
+    format!("\"{}\"", escape_nul::<S>(&s.replace('"', "\"\"")))
+}
+
+/// #5302: jq mode renders U+0000 as the two characters `\0` in `@sh`, `@csv`,
+/// `@tsv` and `@html` (confirmed live against jq 1.7.1; `@uri`/`@base64`/
+/// `@text`/`@json` already agree). yq passes the NUL through raw (confirmed
+/// against yq v4.x), so the rewrite is jq-mode only.
+fn escape_nul<S: EvalSemantics>(s: &str) -> Cow<'_, str> {
+    if S::TAG != EvalTag::Yq && s.contains('\0') {
+        Cow::Owned(s.replace('\0', "\\0"))
+    } else {
+        Cow::Borrowed(s)
+    }
 }
 
 /// Format one row element for `@csv`/`@tsv`/`@dsv`, sharing the
@@ -22137,7 +22149,7 @@ fn format_csv<S: EvalSemantics>(value: &OwnedValue, optional: bool) -> Result<St
         OwnedValue::Array(arr) => {
             let parts = arr
                 .iter()
-                .map(|v| format_csv_row_element::<S>(v, quote_csv_field))
+                .map(|v| format_csv_row_element::<S>(v, quote_csv_field::<S>))
                 .collect::<Result<Vec<String>, EvalError>>()?;
             Ok(parts.join(","))
         }
@@ -22156,10 +22168,13 @@ fn format_tsv<S: EvalSemantics>(value: &OwnedValue, optional: bool) -> Result<St
                 .iter()
                 .map(|v| {
                     format_csv_row_element::<S>(v, |s| {
-                        s.replace('\\', "\\\\")
-                            .replace('\t', "\\t")
-                            .replace('\n', "\\n")
-                            .replace('\r', "\\r")
+                        escape_nul::<S>(
+                            &s.replace('\\', "\\\\")
+                                .replace('\t', "\\t")
+                                .replace('\n', "\\n")
+                                .replace('\r', "\\r"),
+                        )
+                        .into_owned()
                     })
                 })
                 .collect::<Result<Vec<String>, EvalError>>()?;
@@ -22182,7 +22197,7 @@ fn format_dsv<S: EvalSemantics>(
         OwnedValue::Array(arr) => {
             let parts = arr
                 .iter()
-                .map(|v| format_csv_row_element::<S>(v, quote_csv_field))
+                .map(|v| format_csv_row_element::<S>(v, quote_csv_field::<S>))
                 .collect::<Result<Vec<String>, EvalError>>()?;
             Ok(parts.join(delimiter))
         }
@@ -22585,6 +22600,8 @@ fn format_html<S: EvalSemantics>(value: &OwnedValue, _optional: bool) -> Result<
             b'"' => "&quot;",
             // jq 1.7.1 spells it `&apos;`, not `&#39;` (#5297).
             b'\'' => "&apos;",
+            // #5302: jq mode renders U+0000 as `\0`; yq keeps it raw.
+            0 if S::TAG != EvalTag::Yq => "\\0",
             _ => continue,
         };
         if start < i {
@@ -22597,16 +22614,22 @@ fn format_html<S: EvalSemantics>(value: &OwnedValue, _optional: bool) -> Result<
     Ok(result)
 }
 
+/// Single-quote a string for `@sh`, escaping embedded single quotes (and, in
+/// jq mode, U+0000 -- #5302).
+fn shell_quote_str<S: EvalSemantics>(s: &str) -> String {
+    let s = escape_nul::<S>(s);
+    if s.contains('\'') {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    } else {
+        format!("'{s}'")
+    }
+}
+
 /// Shell-quote a single value for @sh
 fn shell_quote_value<S: EvalSemantics>(value: &OwnedValue) -> Result<String, EvalError> {
     match value {
         // jq always quotes strings in @sh array output
-        OwnedValue::String(s) => Ok(if s.contains('\'') {
-            let escaped = s.replace('\'', "'\\''");
-            format!("'{escaped}'")
-        } else {
-            format!("'{s}'")
-        }),
+        OwnedValue::String(s) => Ok(shell_quote_str::<S>(s)),
         // Numbers, bools, null are NOT quoted in jq
         OwnedValue::Int(_) | OwnedValue::Float(_) | OwnedValue::NumberLiteral(..) => {
             Ok(numeric_display_string::<S>(value))
@@ -22642,15 +22665,7 @@ fn format_sh<S: EvalSemantics>(value: &OwnedValue, _optional: bool) -> Result<St
     }
 
     match value {
-        OwnedValue::String(s) => {
-            // Use single quotes and escape single quotes
-            if s.contains('\'') {
-                let escaped = s.replace('\'', "'\\''");
-                Ok(format!("'{escaped}'"))
-            } else {
-                Ok(format!("'{s}'"))
-            }
-        }
+        OwnedValue::String(s) => Ok(shell_quote_str::<S>(s)),
         // jq: [1, 2, 3] | @sh => "1 2 3" (yq mode never reaches here -- the
         // gate above already returned).
         OwnedValue::Array(arr) => {
