@@ -6230,25 +6230,30 @@ fn evaluate_yaml_cursor<W: AsRef<[u64]> + Clone>(
     // run as the document it is: only when the node is there to be navigated to. The presentation
     // it starts from is the parent walk's own, which holds what only the walk can see (a comment
     // after a sequence item's `-`), not a snapshot taken from the node alone.
-    if need_comments || writes_tag(expr) {
+    //
+    // Not in a document with an alias in it: the navigated node can hold an alias whose anchor
+    // lies outside it, or be one, and yq prints those as `*name` (unreadable on its own), which
+    // this route cannot reproduce or soundly resolve (ADR-0018 orders refusing first).
+    if (need_comments || writes_tag(expr)) && !cursor.index().has_aliases() {
         if let Some((nav, rest, steps)) = split_leading_static_nav(expr) {
             if let GenericResult::OneCursor(navigated) =
                 eval_with_cursor_using::<YqSemantics, _>(&nav, cursor)
             {
                 let whole =
                     to_owned_with_comments::<_, YqSemantics>(&cursor.value(), Some(&cursor));
-                if let Some(whole) = sink.materialize(DiagStyle::Yq, whole, &no_location()) {
-                    if let Some(sub) = descend_value_and_tree(&whole.0, &whole.1, &steps) {
-                        return evaluate_yaml_cursor_core(
-                            navigated,
-                            &rest,
-                            sink,
-                            need_comments,
-                            strip_style,
-                            sort_keys,
-                            Some(sub),
-                        );
-                    }
+                let Some(whole) = sink.materialize(DiagStyle::Yq, whole, &no_location()) else {
+                    return Ok(Vec::new());
+                };
+                if let Some(sub) = descend_value_and_tree(&whole.0, &whole.1, &steps) {
+                    return evaluate_yaml_cursor_core(
+                        navigated,
+                        &rest,
+                        sink,
+                        need_comments,
+                        strip_style,
+                        sort_keys,
+                        Some(sub),
+                    );
                 }
             }
         }
@@ -6471,7 +6476,8 @@ fn evaluate_yaml_cursor_core<W: AsRef<[u64]> + Clone>(
                     "metadata assignment (line_comment/style/anchor = ...) is not supported \
                      behind a navigation that is not a path to one existing node (`.a.b`, \
                      `.[0]`), one that reads the node's own context (`key`, `path`, `line`, a \
-                     comment), or a stage that calls a `def` (#2679)",
+                     comment), a document with an alias in it, or a stage that calls a \
+                     `def` (#2679)",
                 ),
                 &no_location(),
             );

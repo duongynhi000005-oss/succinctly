@@ -1,6 +1,6 @@
 //! #2679: a metadata write behind a static navigation (`.a | .b line_comment = "hi"`) is applied
 //! on the navigated node, which keeps its own presentation, as real yq does. Every expected output
-//! is what yq v4.53.3 prints, bar the two rows `limitations.md` records.
+//! is what yq v4.53.3 prints.
 
 use anyhow::Result;
 
@@ -23,7 +23,7 @@ fn test_write_behind_static_navigation_keeps_the_subtree_presentation_2679() -> 
         // A node that declares an anchor keeps it; a write may declare one.
         (
             ".x | .m line_comment = \"kk\"",
-            "x: &k\n  m: 1\ny: *k\n",
+            "x: &k\n  m: 1\n",
             "&k\nm: 1 # kk\n",
         ),
         (
@@ -130,8 +130,9 @@ fn test_tag_write_behind_navigation_applies_to_json_output_2679() -> Result<()> 
     Ok(())
 }
 
-/// JSON output has no comments to place, so the write changes nothing there; and a write that
-/// lands on an alias prints the node it resolves to, where yq prints `*k` (`limitations.md`).
+/// JSON output has no comments to place, so the write changes nothing there; and a document that
+/// holds an alias is refused, since yq prints an alias whose anchor lies outside the navigated
+/// node as `*k` (`limitations.md`).
 #[test]
 fn test_write_behind_navigation_json_and_alias_rows_2679() -> Result<()> {
     let (out, code) = run_yq_stdin(
@@ -141,11 +142,13 @@ fn test_write_behind_navigation_json_and_alias_rows_2679() -> Result<()> {
     )?;
     assert_eq!((out.trim(), code), (r#"{"b":1}"#, 0));
 
-    let (out, code) = run_yq_stdin(
+    for filter in [
         ".y | .m line_comment = \"kk\"",
-        "x: &k\n  m: 1\ny: *k\n",
-        &[],
-    )?;
-    assert_eq!((out.as_str(), code), ("m: 1 # kk\n", 0));
+        ".x | .m line_comment = \"kk\"",
+    ] {
+        let (out, err, code) = run_yq_stdin_with_stderr(filter, "x: &k\n  m: 1\ny: *k\n", &[])?;
+        assert_eq!((out.as_str(), code), ("", 1), "{filter}: {err}");
+        assert!(err.contains("#2679"), "{filter}: {err}");
+    }
     Ok(())
 }

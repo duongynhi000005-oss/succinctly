@@ -5749,7 +5749,7 @@ Four known gaps this write shares with every other write form, none specific to 
   `resolve_meta_assign_writes` only runs when the whole expression passes `is_shape_preserving` (`src/jq/eval.rs`), whose fixed operator list has no bare navigation stage, and a write after one belongs on the navigated subtree, which no route here has a presentation tree for.
   Such a write used to exit 0 with the write silently dropped, the outcome #798's triage ruled out; the refusal is the divergence ADR-0018 allows when matching would discard a write.
   A leading user-defined `def` that a stage ahead of the write reads through (`def f: .; f | .a line_comment = "hi"`) is refused the same way, since each stage is re-evaluated alone with no `def` in scope; real yq has no `def`, so there is no oracle.
-  A static navigation that lands on an alias (`.y | .m line_comment = "kk"` on `x: &k\n  m: 1\ny: *k\n`) prints the resolved node with the write, where yq prints `*k` and drops it: a root `*name` is never emitted here.
+  A document that holds an alias anywhere is refused too (`.y | .m line_comment = "kk"` on `x: &k\n  m: 1\ny: *k\n`): the navigated node can be an alias, or hold one whose anchor lies outside it, and yq prints those as `*k`, which is unreadable on its own and which a root `*name` never is here.
   Pinned by `metadata_write_behind_navigation_or_def_is_refused_not_dropped_2679` and `tests/yq_cli/i2679.rs`.
   Presentation a *non-metadata* write loses behind a navigation (`.a | .b = 5` drops the subtree's comments and flow style, where yq keeps them) is the same gap, still open.
   [#2855](https://github.com/rust-works/succinctly/issues/2855)'s `sort_keys(f)` hits this
