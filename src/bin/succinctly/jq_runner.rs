@@ -216,10 +216,14 @@ pub struct ModuleLoader {
     /// [`Self::bind_dot_jq`] to resolve those directives (#5339). `None` for a `~/.jq`
     /// without any, whose defs are already in [`Self::auto_loaded_defs`], and once bound.
     dot_jq: Option<DotJq>,
-    /// The path of a `~/.jq` that carries directives, bound or not, so
-    /// [`Self::failure_report`] can walk them last, where jq does (#5339). `None` for one
-    /// without any: there is nothing of it to walk.
+    /// The path of a `~/.jq` that carries directives, bound or not, or that cannot be used
+    /// at all, so [`Self::failure_report`] can walk it last, where jq does (#5339, #5351).
+    /// `None` for one with neither: there is nothing of it to walk.
     dot_jq_path: Option<PathBuf>,
+    /// Why a `~/.jq` that exists cannot be used (#5351): it does not read, does not parse, or
+    /// holds a main expression. jq refuses to compile anything while it is so, and
+    /// [`Self::bind_dot_jq`] raises this.
+    dot_jq_failure: Option<ReportEntry>,
     /// The modules whose own dependencies are currently being loaded, as
     /// `(resolved canonical file, module path as written)`, outermost first
     /// (#2865).
@@ -357,10 +361,9 @@ pub(crate) enum ReportEntry {
     /// or a module's file exists but could not be read (#3573): jq loads a
     /// module through the same reader, so an unreadable module is printed
     /// `error loading data file <path>: ...` and counted, and the walk goes on
-    /// (`include "m1"; include "perm"` prints `perm`, then `m1`). jq parses the
-    /// module's raw bytes, so a module with invalid UTF-8 is a syntax error
-    /// there, where succinctly's reader refuses it here, a difference of kind
-    /// that keeps the count.
+    /// (`include "m1"; include "perm"` prints `perm`, then `m1`). A module with
+    /// invalid UTF-8 is not unreadable: jq parses the raw bytes, and so does
+    /// [`read_library`] (#5351).
     ///
     /// **Wording is succinctly's own** past the `error loading data file
     /// {path}:` prefix, the same fidelity limit [`Self::Syntax`] already
@@ -370,6 +373,13 @@ pub(crate) enum ReportEntry {
     /// byte-for-byte. `path` is the resolved file, matching
     /// [`Self::Syntax`]'s own by-path naming.
     Data(DataFileFailure),
+    /// A library -- a module, or `~/.jq` -- holds an expression of its own after its
+    /// definitions (#5351). jq checks this right after parsing the file, before it
+    /// looks at the file's own `import`/`include`, and counts it as one error:
+    /// `jq: error: jq: error: library should only have function definitions, not a main
+    /// expression`, then `<unknown location>` where the source echo would be. The doubled
+    /// `jq: error:` prefix is jq's own, captured live against 1.7.1.
+    MainExpression,
 }
 
 /// A data import's file that exists but could not be read or parsed
@@ -506,6 +516,12 @@ fn print_report_entry(entry: &ReportEntry) {
             eprintln!("jq: error loading data file {}: {detail}", path.display());
             eprintln!();
         }
+        ReportEntry::MainExpression => {
+            eprintln!(
+                "jq: error: jq: error: library should only have function definitions, not a main expression"
+            );
+            eprintln!("<unknown location>");
+        }
     }
 }
 
@@ -556,6 +572,14 @@ impl From<anyhow::Error> for BuildContextError {
 /// jq's own usage-error wording never includes it.
 fn report_usage_error(message: &str) {
     eprintln!("jq: {message}");
+}
+
+/// The text of a library file -- a module, or `~/.jq` -- read as jq reads it (#5351): jq parses
+/// the raw bytes, so a byte that is not UTF-8 is harmless inside a comment, reads as U+FFFD
+/// inside a string, and is a syntax error anywhere else. Decoding it lossily hands the parser
+/// the same three outcomes, where `read_to_string` refused the whole file.
+fn read_library(path: &Path) -> std::io::Result<String> {
+    std::fs::read(path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Strip Rust's `std::io::Error` Display's own `" (os error N)"` suffix,
@@ -1388,7 +1412,7 @@ impl FailureWalk<'_> {
         if self.visited.contains(&canonical) {
             return 0;
         }
-        let errors = match std::fs::read_to_string(file) {
+        let errors = match read_library(file) {
             // An unreadable module is counted like a data file that did not
             // load, and the walk goes on (see [`ReportEntry::Data`]).
             Err(e) => {
@@ -1423,6 +1447,12 @@ impl FailureWalk<'_> {
                 });
                 1
             }
+            // A main expression counts once and, as for a syntax error, its own directives
+            // are never reached (#5351).
+            Ok(program) if program.has_main_expr => {
+                self.entries.push(ReportEntry::MainExpression);
+                1
+            }
             Ok(program) => {
                 self.chain
                     .push((canonical.to_path_buf(), as_written.to_string()));
@@ -1446,6 +1476,7 @@ impl ModuleLoader {
         let mut auto_loaded_defs = Vec::new();
         let mut dot_jq = None;
         let mut dot_jq_path = None;
+        let mut dot_jq_failure = None;
 
         // Add command-line -L paths first
         for path in library_paths {
@@ -1470,32 +1501,56 @@ impl ModuleLoader {
             let jq_path = PathBuf::from(home).join(".jq");
             if jq_path.is_file() {
                 // Auto-load ~/.jq file - functions defined here are always available
-                if let Ok(contents) = std::fs::read_to_string(&jq_path) {
-                    if let Ok(program) = jq::parse_program(&contents) {
-                        // #2774: same stamping as an `include`d module's
-                        // defs, using `~/.jq`'s own canonical path.
-                        // Run id 0 is reserved for `~/.jq` (#2951): it is
-                        // wrapped as its own run like any module, so its
-                        // bodies cannot see an `include`d or `import`ed name
-                        // either -- real jq keeps both out.
-                        run_origins.insert(
-                            AUTO_LOAD_RUN_ID,
-                            canonical_or_self(&jq_path).to_string_lossy().into_owned(),
-                        );
-                        if program.includes.is_empty() && program.imports.is_empty() {
-                            auto_loaded_defs = extract_and_stamp_func_defs(&program.expr, jq_path);
-                        } else {
-                            // Its directives resolve against the search path, which is
-                            // not complete until the end of this function, and a failure
-                            // is a compile error this constructor cannot return (#5339).
+                //
+                // One that cannot be used is a compile error for every program (#5351), which
+                // this constructor cannot return: the failure waits for `bind_dot_jq`.
+                let canonical = canonical_or_self(&jq_path);
+                match read_library(&jq_path) {
+                    Err(e) => {
+                        dot_jq_path = Some(jq_path.clone());
+                        dot_jq_failure = Some(ReportEntry::Data(DataFileFailure {
+                            path: canonical,
+                            detail: strerror_only(&e),
+                        }));
+                    }
+                    Ok(contents) => match jq::parse_program(&contents) {
+                        Err(error) => {
                             dot_jq_path = Some(jq_path.clone());
-                            dot_jq = Some(DotJq {
-                                program,
+                            dot_jq_failure = Some(ReportEntry::Syntax {
+                                path: canonical,
                                 contents,
-                                path: jq_path,
+                                error,
                             });
                         }
-                    }
+                        Ok(program) if program.has_main_expr => {
+                            dot_jq_path = Some(jq_path.clone());
+                            dot_jq_failure = Some(ReportEntry::MainExpression);
+                        }
+                        Ok(program) => {
+                            // #2774: same stamping as an `include`d module's
+                            // defs, using `~/.jq`'s own canonical path.
+                            // Run id 0 is reserved for `~/.jq` (#2951): it is
+                            // wrapped as its own run like any module, so its
+                            // bodies cannot see an `include`d or `import`ed name
+                            // either -- real jq keeps both out.
+                            run_origins
+                                .insert(AUTO_LOAD_RUN_ID, canonical.to_string_lossy().into_owned());
+                            if program.includes.is_empty() && program.imports.is_empty() {
+                                auto_loaded_defs =
+                                    extract_and_stamp_func_defs(&program.expr, jq_path);
+                            } else {
+                                // Its directives resolve against the search path, which is
+                                // not complete until the end of this function, and a failure
+                                // is a compile error this constructor cannot return (#5339).
+                                dot_jq_path = Some(jq_path.clone());
+                                dot_jq = Some(DotJq {
+                                    program,
+                                    contents,
+                                    path: jq_path,
+                                });
+                            }
+                        }
+                    },
                 }
             } else if jq_path.is_dir() {
                 // Add ~/.jq directory to search path
@@ -1524,6 +1579,7 @@ impl ModuleLoader {
             auto_loaded_defs,
             dot_jq,
             dot_jq_path,
+            dot_jq_failure,
             loading: Vec::new(),
             run_ids: BTreeMap::new(),
             run_origins,
@@ -1734,7 +1790,7 @@ impl ModuleLoader {
         }
 
         // Read and parse the module
-        let contents = std::fs::read_to_string(&file_path).map_err(|e| {
+        let contents = read_library(&file_path).map_err(|e| {
             ModuleLoadError::single(ReportEntry::Data(DataFileFailure {
                 path: canonical.clone(),
                 detail: strerror_only(&e),
@@ -1748,6 +1804,12 @@ impl ModuleLoader {
                 error: e,
             })
         })?;
+
+        // jq checks this straight after parsing, before it reads the module's own
+        // directives (#5351).
+        if program.has_main_expr {
+            return Err(ModuleLoadError::single(ReportEntry::MainExpression));
+        }
 
         let own_id = self.run_id_for(target);
         self.bind_parsed_module(
@@ -1771,6 +1833,9 @@ impl ModuleLoader {
     /// Run id [`AUTO_LOAD_RUN_ID`] is its own run, which is where those dependencies are
     /// linked from (see [`Self::walk_modules`]).
     fn bind_dot_jq(&mut self) -> Result<(), ModuleLoadError> {
+        if let Some(failure) = self.dot_jq_failure.take() {
+            return Err(ModuleLoadError::single(failure));
+        }
         let Some(dot) = self.dot_jq.take() else {
             return Ok(());
         };
@@ -3941,7 +4006,7 @@ struct ModuleSource {
 
 impl ModuleSource {
     fn read(path: &str) -> Option<Self> {
-        let source = std::fs::read_to_string(path).ok()?;
+        let source = read_library(Path::new(path)).ok()?;
         let defs = jq::collect_def_sites(&source, jq::ParserMode::Jq, true);
         Some(Self {
             source,
@@ -12218,6 +12283,7 @@ mod tests {
                     ReportEntry::Cycle { .. } => "C",
                     ReportEntry::Syntax { .. } => "S",
                     ReportEntry::Data(_) => "D",
+                    ReportEntry::MainExpression => "X",
                 })
                 .collect();
             (kinds, e.errors)
@@ -12230,6 +12296,27 @@ mod tests {
                 failure("import \"bad\" as $d; include \"syn\"; 1"),
                 (vec!["S", "D"], 2)
             );
+        }
+
+        /// #5351: a module with a main expression is one entry, counted once, and the walk goes on.
+        #[test]
+        fn a_module_with_a_main_expression_reports_the_walk() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::write(dir.path().join("syn.jq"), "def f: 1 +;\n").expect("write syn");
+            std::fs::write(dir.path().join("main.jq"), "def f: 1; f\n").expect("write main");
+            let mut loader = ModuleLoader::new(&[dir.path().to_path_buf()]);
+            let program = jq::parse_program("include \"main\"; include \"syn\"; 1").expect("parse");
+            let e = loader.process_program(&program).expect_err("must fail");
+            let kinds: Vec<&str> = e
+                .entries
+                .iter()
+                .map(|entry| match entry {
+                    ReportEntry::Syntax { .. } => "S",
+                    ReportEntry::MainExpression => "X",
+                    _ => "?",
+                })
+                .collect();
+            assert_eq!((kinds, e.errors), (vec!["S", "X"], 2));
         }
 
         #[test]

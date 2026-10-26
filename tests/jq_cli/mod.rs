@@ -162,3 +162,4 @@ mod i5322;
 mod i5327;
 mod i5338;
 mod i5339;
+mod i5351;

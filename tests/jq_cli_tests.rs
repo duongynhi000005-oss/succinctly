@@ -29369,21 +29369,21 @@ fn test_a_module_cycle_ends_the_walk_after_what_jq_printed_first_3573() -> Resul
 /// module jq reports (`include "perm"; include "m1"`). Every expectation but
 /// the invalid-UTF-8 rows' kind was captured from `/usr/bin/jq` 1.7.1: jq
 /// parses a module's raw bytes, so there `badutf.jq` is a syntax error (`S`),
-/// where succinctly's reader refuses it (`D`); the count and the walk are
+/// and since #5351 so is it here; the count and the walk are
 /// jq's. The permission rows need a user the permission bits bind, so they are
 /// skipped where `chmod 000` still reads (root).
 #[test]
 fn test_an_unreadable_module_is_counted_and_the_walk_goes_on_3573() -> Result<()> {
     assert_directive_rows_3573(
         &[
-            (r#"include "badutf"; 1"#, "D:badutf.jq T:1"),
+            (r#"include "badutf"; 1"#, "S:badutf.jq T:1"),
             (
                 r#"include "m1"; include "badutf"; 1"#,
-                "D:badutf.jq M:m1 T:1",
+                "S:badutf.jq M:m1 T:1",
             ),
             (
                 r#"include "badutf"; import "bad" as $d; $d"#,
-                "D:bad.json D:badutf.jq T:2",
+                "D:bad.json S:badutf.jq T:2",
             ),
         ],
         3,
