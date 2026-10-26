@@ -436,7 +436,11 @@ fn print_report_entry(entry: &ReportEntry) {
         // jq's own shape for a module it cannot find: the message, then a blank
         // line standing in for the missing source echo.
         ReportEntry::NotFound { module_path } => {
-            eprintln!("jq: error: module not found: {module_path}");
+            // jq rejects a malformed path before it searches, in the same report (#5322).
+            match invalid_module_path(module_path) {
+                Some(message) => eprintln!("jq: error: {message}"),
+                None => eprintln!("jq: error: module not found: {module_path}"),
+            }
             eprintln!();
         }
         ReportEntry::Cycle { chain } => {
@@ -545,6 +549,36 @@ fn read_arg_file(flag: &str, name: &str, file: &str) -> Result<String, BuildCont
     })
 }
 
+/// Why jq refuses `module_path` as a relative module path before searching for it (#5322): its
+/// `validate_relpath`, the same three checks in the same order, confirmed live against jq 1.7.1.
+///
+/// A backslash first; then the components left to right, where the first of "equal to the one
+/// before it" (`b/b`, and `a///b` for its empty ones) and `..` ends the scan -- so `../a/a` is a
+/// parent-directory error and `a/a/..` an equal-components one. `a//b`, `a/./b`, `/abs` and `b/`
+/// pass, and are simply not found when nothing is there.
+fn invalid_module_path(module_path: &str) -> Option<String> {
+    if module_path.contains('\\') {
+        return Some(format!(
+            "Modules must be named by relative paths using '/', not '\\' ({module_path})"
+        ));
+    }
+    let mut previous = None;
+    for component in module_path.split('/') {
+        if previous == Some(component) {
+            return Some(format!(
+                "module names must not have equal consecutive components: {module_path}"
+            ));
+        }
+        if component == ".." {
+            return Some(format!(
+                "Relative paths to modules may not traverse to parent directories ({module_path})"
+            ));
+        }
+        previous = Some(component);
+    }
+    None
+}
+
 /// Resolve a module path to a file path within `search_path`.
 ///
 /// A free function rather than a `ModuleLoader` method (#2395). The original
@@ -573,6 +607,9 @@ fn resolve_with_suffix(
     module_path: &str,
     suffix: &str,
 ) -> Option<PathBuf> {
+    if invalid_module_path(module_path).is_some() {
+        return None;
+    }
     let last = module_path.rsplit('/').next().unwrap_or(module_path);
     let spellings = [
         format!("{module_path}{suffix}"),
