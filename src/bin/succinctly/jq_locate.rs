@@ -16,7 +16,7 @@ pub struct JqLocateArgs {
     /// Input JSON file
     pub file: PathBuf,
 
-    /// Byte offset in file (0-indexed)
+    /// Byte offset in file (0-indexed), counted after a leading UTF-8 byte-order mark
     #[arg(long, conflicts_with_all = ["line", "column"])]
     pub offset: Option<usize>,
 
@@ -24,7 +24,7 @@ pub struct JqLocateArgs {
     #[arg(long, requires = "column")]
     pub line: Option<usize>,
 
-    /// Column number (1-indexed, byte offset within line)
+    /// Column number (1-indexed, byte offset within line; line 1 starts after a leading BOM)
     #[arg(long, requires = "line")]
     pub column: Option<usize>,
 
@@ -46,8 +46,18 @@ pub enum LocateFormat {
 /// Run the jq-locate command
 pub fn run_jq_locate(args: JqLocateArgs) -> Result<i32> {
     // Read the file
-    let text = std::fs::read(&args.file)
+    let mut text = std::fs::read(&args.file)
         .with_context(|| format!("Failed to read file: {}", args.file.display()))?;
+
+    // #5313: a leading UTF-8 byte-order mark is not part of the document. `succinctly jq` drops it
+    // before indexing (#5291), so `at_offset(n)` and `at_position` count from the first byte after
+    // it, and so does this: the same `n` names the same node in both. Editors show the same text.
+    let bom_len = if text.starts_with(crate::front_matter::UTF8_BOM) {
+        crate::front_matter::UTF8_BOM.len()
+    } else {
+        0
+    };
+    text.drain(..bom_len);
 
     // Determine the byte offset
     let offset = match (args.offset, args.line, args.column) {
@@ -67,8 +77,13 @@ pub fn run_jq_locate(args: JqLocateArgs) -> Result<i32> {
 
     // Validate offset
     if offset >= text.len() {
+        let after_bom = if bom_len > 0 {
+            format!(", after a {bom_len}-byte byte-order mark")
+        } else {
+            String::new()
+        };
         anyhow::bail!(
-            "Offset {} is out of bounds (file size: {} bytes)",
+            "Offset {} is out of bounds (file size: {} bytes{after_bom})",
             offset,
             text.len()
         );

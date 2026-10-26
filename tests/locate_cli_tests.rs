@@ -222,3 +222,53 @@ fn jq_locate_answers_when_invalid_utf8_is_in_a_key() -> Result<()> {
     }
     Ok(())
 }
+
+/// #5313: a leading UTF-8 byte-order mark is not part of the document. `succinctly jq` drops it
+/// before indexing (#5291), so `at_offset(n)` counts from the first byte after it; `jq-locate`
+/// does the same, so a BOM-prefixed file answers exactly as the same file without the BOM, in
+/// both tools.
+#[test]
+fn jq_locate_and_at_offset_agree_on_a_bom_prefixed_file() -> Result<()> {
+    let doc = br#"{"name": "Alice", "age": 30}"#;
+    let mut with_bom = b"\xef\xbb\xbf".to_vec();
+    with_bom.extend_from_slice(doc);
+    let mut bom_file = tempfile::NamedTempFile::new().expect("create temp fixture");
+    std::io::Write::write_all(&mut bom_file, &with_bom).expect("write fixture");
+    let mut plain_file = tempfile::NamedTempFile::new().expect("create temp fixture");
+    std::io::Write::write_all(&mut plain_file, doc).expect("write fixture");
+    let bom = bom_file.path().to_str().expect("utf8 path");
+    let plain = plain_file.path().to_str().expect("utf8 path");
+
+    for offset in ["0", "1", "9", "12", "27"] {
+        let (located, stderr, code) = run(&["jq-locate", bom, "--offset", offset])?;
+        assert_eq!(code, 0, "offset {offset}: {stderr}");
+        let (plain_located, _, _) = run(&["jq-locate", plain, "--offset", offset])?;
+        assert_eq!(located, plain_located, "offset {offset}");
+
+        // `at_offset` lands on the node it lands on in the same file without the mark.
+        let (by_offset, stderr, code) = run(&["jq", "-c", &format!("at_offset({offset})"), bom])?;
+        assert_eq!(code, 0, "at_offset({offset}): {stderr}");
+        let (plain_by_offset, _, _) = run(&["jq", "-c", &format!("at_offset({offset})"), plain])?;
+        assert_eq!(by_offset, plain_by_offset, "offset {offset}");
+    }
+
+    // Line 1 starts after the BOM too: column 1 is the `{`, column 10 is inside `"Alice"`.
+    let (root, _, _) = run(&["jq-locate", bom, "--line", "1", "--column", "1"])?;
+    assert_eq!(root, ".");
+    let (alice, _, _) = run(&["jq-locate", bom, "--line", "1", "--column", "10"])?;
+    assert_eq!(alice, ".name");
+
+    // The byte range counts from the first byte after the mark.
+    let (json, _, _) = run(&["jq-locate", bom, "--offset", "12", "--format", "json"])?;
+    let json: serde_json::Value = serde_json::from_str(&json)?;
+    assert_eq!(json["byte_range"], serde_json::json!([9, 16]));
+
+    // The first byte past the document is out of bounds, and the message says the mark was skipped.
+    let (_, stderr, code) = run(&["jq-locate", bom, "--offset", "28"])?;
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("file size: 28 bytes, after a 3-byte byte-order mark"),
+        "{stderr}"
+    );
+    Ok(())
+}
