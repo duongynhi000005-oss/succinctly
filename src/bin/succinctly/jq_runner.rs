@@ -7712,7 +7712,12 @@ fn find_literal_end(bytes: &[u8], pos: usize) -> Option<usize> {
 /// the rejection was a divergence only `--argjson`/`--jsonargs` still
 /// carried.
 fn parse_json_value(s: &str) -> Result<OwnedValue> {
-    let s = s.trim();
+    // #5291: jq's parser skips a leading BOM here too, but a BOM-only text is still not JSON.
+    let s = s
+        .strip_prefix('\u{feff}')
+        .filter(|rest| !rest.trim().is_empty())
+        .unwrap_or(s)
+        .trim();
     if s.is_empty() {
         return Ok(OwnedValue::Null);
     }
@@ -7767,7 +7772,9 @@ fn parse_json_value(s: &str) -> Result<OwnedValue> {
 /// the main input path's cross-check invariant above still holds -- it
 /// still never diverges, just via equality now instead of strict subset.
 fn parse_json_stream(s: &str) -> Result<Vec<OwnedValue>> {
-    let s = s.trim();
+    // #5291: jq's parser skips a leading BOM before anything else, so whitespace ahead of one
+    // leaves it standing, to be refused.
+    let s = s.strip_prefix('\u{feff}').unwrap_or(s).trim();
     if s.is_empty() {
         return Ok(vec![]);
     }
