@@ -13451,13 +13451,12 @@ fn owned_state_scalar_direct<S: EvalSemantics>(
 }
 
 /// An integer (or an integer literal spelled as its own digits) no larger than 2^53: the range in
-/// which jq's double arithmetic is exact.
+/// which jq's double arithmetic is exact ([`jq_int_within_exact_f64_range`]).
 fn exact_integer(value: &OwnedValue) -> bool {
-    const LIMIT: u64 = 1 << 53;
     match value {
-        OwnedValue::Int(n) => n.unsigned_abs() <= LIMIT,
+        OwnedValue::Int(n) => jq_int_within_exact_f64_range(*n),
         OwnedValue::NumberLiteral(NumberRepr::Int(n), _) => {
-            n.unsigned_abs() <= LIMIT && owned_scalar_spelled_the_same(value)
+            jq_int_within_exact_f64_range(*n) && owned_scalar_spelled_the_same(value)
         }
         _ => false,
     }
@@ -13468,9 +13467,20 @@ fn exact_integer(value: &OwnedValue) -> bool {
 fn owned_scalar_spelled_the_same(value: &OwnedValue) -> bool {
     match value {
         OwnedValue::Null | OwnedValue::Bool(_) | OwnedValue::Int(_) | OwnedValue::String(_) => true,
-        OwnedValue::NumberLiteral(NumberRepr::Int(n), text) => **text == *n.to_string(),
+        OwnedValue::NumberLiteral(NumberRepr::Int(n), text) => is_canonical_int_text(*n, text),
         _ => false,
     }
+}
+
+/// Whether `text` is exactly how `n` is written in decimal: no `+`, no leading zero, no `-0`.
+/// Allocation-free, since it runs for every integer literal a fold step reads.
+fn is_canonical_int_text(n: i64, text: &str) -> bool {
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && (digits == "0" || !digits.starts_with('0'))
+        && (n != 0 || text == "0")
+        && text.parse::<i64>() == Ok(n)
 }
 
 /// The step a `.[K]` key names: the string or integer-spelled number `K` is
@@ -152138,6 +152148,29 @@ mod share_audit_2999 {
         assert_eq!(OPERAND_REBUILT.with(core::cell::Cell::get), before);
         assert!(owned_assign_operand::<JqSemantics>(&operand("[.i / 2]"), &wide).is_some());
         assert_eq!(OPERAND_REBUILT.with(core::cell::Cell::get), before + 1);
+    }
+
+    /// #5288: an integer literal prints as it was written, so the direct route takes one only when
+    /// its text is the integer's own digits.
+    #[test]
+    fn canonical_integer_text_is_the_integers_own_digits_5288() {
+        for (n, text, canonical) in [
+            (5, "5", true),
+            (0, "0", true),
+            (-5, "-5", true),
+            (i64::MAX, "9223372036854775807", true),
+            (5, "+5", false),
+            (5, "05", false),
+            (0, "-0", false),
+            (0, "00", false),
+            (5, "5.0", false),
+            (5, "5e0", false),
+            (5, "", false),
+            (5, "-", false),
+            (6, "5", false),
+        ] {
+            assert_eq!(is_canonical_int_text(n, text), canonical, "{n} {text:?}");
+        }
     }
 
     /// The state `{i: 3, j: "x", n: 10, big: [0, 1, ..]}` with `width` elements in `big`.
