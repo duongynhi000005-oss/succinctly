@@ -2,7 +2,9 @@
 //! is bound as `$a` and as `$a::a`, and `$x::y` is an ordinary (here, undefined) variable
 //! otherwise, usable as a pattern binder and in `{$x::y}`. `$a::b` did not parse. Every answer
 //! below was captured from jq 1.7.1; the data files are `d1.json` = `{"v":1}`, `d2.json` =
-//! `{"v":2}`, and the module `s1.jq` = `def e: 1;`.
+//! `{"v":2}`, the module `s1.jq` = `def e: 1;`, and two modules with data imports of their own:
+//! `mdat.jq` = `import "d1" as $d; def f: $d; def g: $d::d;` and `mdat2.jq`, which imports both
+//! files under `$d`.
 
 use std::process::Command;
 
@@ -17,6 +19,11 @@ fn run_with_data(program: &str) -> Result<(String, String, i32)> {
         ("d1.json", "{\"v\":1}"),
         ("d2.json", "{\"v\":2}"),
         ("s1.jq", "def e: 1;"),
+        ("mdat.jq", "import \"d1\" as $d; def f: $d; def g: $d::d;"),
+        (
+            "mdat2.jq",
+            "import \"d1\" as $d; import \"d2\" as $d; def f: [$d, $d::d];",
+        ),
     ] {
         std::fs::write(dir.path().join(name), contents)?;
     }
@@ -81,6 +88,17 @@ fn test_a_data_import_is_also_bound_as_alias_colon_colon_alias_5295() -> Result<
             "[1,[{\"v\":1}]]\n",
         ),
         ("import \"d1\" as $d; $d::d.v?", ""),
+        ("include \"mdat\"; [f, g]", "[[{\"v\":1}],[{\"v\":1}]]\n"),
+        (
+            "import \"mdat\" as m; [m::f, m::g]",
+            "[[{\"v\":1}],[{\"v\":1}]]\n",
+        ),
+        ("include \"mdat2\"; f", "[[{\"v\":2}],[{\"v\":2}]]\n"),
+        ("import \"mdat\" as m; m::g", "[{\"v\":1}]\n"),
+        (
+            "import \"mdat\" as m; import \"d1\" as $d; [m::f, $d::d]",
+            "[[{\"v\":1}],[{\"v\":1}]]\n",
+        ),
     ] {
         let (stdout, stderr, code) = run_with_data(program)?;
         assert_eq!(stdout, want, "{program}: {stderr}");

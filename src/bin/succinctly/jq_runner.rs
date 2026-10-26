@@ -690,9 +690,14 @@ fn read_data_file(path: &Path) -> Result<OwnedValue, DataFileFailure> {
 /// a literal, so a *second* call for the same name has nothing left to find
 /// -- calling it once per binding in source order would let the first
 /// (wrong) value win instead of the last, not the reverse.
+///
+/// Also where jq's second spelling is bound (#5295): a data import `import "d" as $a;` is
+/// `$a` and `$a::a`, in the main program and inside a module alike, and both callers fold
+/// their bindings through here.
 fn dedup_bindings_last_wins(bindings: Vec<(String, OwnedValue)>) -> Vec<(String, OwnedValue)> {
     let mut map = BTreeMap::new();
     for (name, value) in bindings {
+        map.insert(format!("{name}::{name}"), value.clone());
         map.insert(name, value);
     }
     map.into_iter().collect()
@@ -1875,11 +1880,7 @@ impl ModuleLoader {
             // ends the pass like any other directive's.
             if import.data {
                 match load_data_import(&self.search_path, &import.path) {
-                    // jq binds a data import under both `$alias` and `$alias::alias` (#5295).
-                    Ok(value) => {
-                        data_bindings.push((format!("{0}::{0}", import.alias), value.clone()));
-                        data_bindings.push((import.alias.clone(), value));
-                    }
+                    Ok(value) => data_bindings.push((import.alias.clone(), value)),
                     Err(e) => return Err(self.failure_report(program, e)),
                 }
                 continue;
