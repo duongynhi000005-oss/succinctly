@@ -81,7 +81,28 @@ fn test_reads_and_json_output_keep_their_route_5286() -> Result<()> {
     assert_eq!((out.as_str(), code), ("1\n", 0));
 
     let (out, code) = run_yq_stdin(".a | .b = 5", DOC, &["-o", "json", "-I0"])?;
+    assert_eq!(
+        (out.as_str(), code),
+        (
+            "{\"b\":5,\"c\":[1,2],\"d\":{\"x\":1},\"e\":\"q\",\"f\":\"r\"}\n",
+            0
+        )
+    );
+    Ok(())
+}
+
+/// The route stays off for a document with an alias, and for a write that reads the node's own
+/// context (`key`): they keep the old route's block-style, comment-free answer (the loss
+/// `limitations.md` records), which a regression of either gate would change.
+#[test]
+fn test_the_route_gates_keep_the_old_answer_5286() -> Result<()> {
+    let plain = "b: 5\nc:\n  - 1\n  - 2\nd:\n  x: 1\ne: q\nf: r\n";
+    let (out, code) = run_yq_stdin(".a | .b = (key | length)", DOC, &[])?;
     assert_eq!(code, 0);
-    assert!(out.starts_with(r#"{"b":5,"c":[1,2],"d":{"x":1}"#), "{out}");
+    assert!(!out.contains("# flow"), "{out}");
+
+    let aliased = format!("{DOC}y: &k [1]\nw: *k\n");
+    let (out, code) = run_yq_stdin(".a | .b = 5", &aliased, &[])?;
+    assert_eq!((out.as_str(), code), (plain, 0));
     Ok(())
 }

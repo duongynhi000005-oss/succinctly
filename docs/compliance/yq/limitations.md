@@ -5765,7 +5765,8 @@ Four known gaps this write shares with every other write form, none specific to 
   Pinned by `metadata_write_behind_navigation_or_def_is_refused_not_dropped_2679` and `tests/yq_cli/i2679.rs`.
   An ordinary write behind a static navigation (`.a | .b = 5`, `.a | del(.b)`, `.a | sort_keys(.)`) takes the same route, so the subtree keeps its comments, flow style and quoting as in yq (#5286).
   [#2855](https://github.com/rust-works/succinctly/issues/2855)'s `sort_keys(f)` was the first case of the loss to be noticed; it is pinned by `test_yq_sort_keys_composes_with_pipe_2855` (`tests/yq_cli_tests.rs`) and `tests/yq_cli/i5286.rs`.
-  What remains is the loss that already exists without a navigation: a write that replaces a block or flow container with another shape drops the comment on the container it replaced (a trailing `# c` on `d: [1]`, a standalone `# note` above `d:`), where yq keeps it ([#5258](https://github.com/rust-works/succinctly/issues/5258)).
+  What remains is the loss that already exists without a navigation: a write that replaces a node with a different shape drops the comment on the node it replaced (a trailing `# c` on `d: [1]`, a standalone `# note` above `d:` or above a scalar a container replaces), where yq keeps it ([#5258](https://github.com/rust-works/succinctly/issues/5258)).
+  A write followed by a read behind the navigation (`.a | (.b = 1) | .c`) is not a presentation-preserving write as a whole and still takes the old route, which loses the subtree's flow style.
 
 Finally, one rule real yq decides by the target's value, reproduced rather than "fixed":
 a `line_comment` written onto a **block-rendered container** is dropped (`.a line_comment

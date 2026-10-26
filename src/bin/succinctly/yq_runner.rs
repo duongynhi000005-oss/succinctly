@@ -6124,6 +6124,13 @@ fn split_leading_static_nav(expr: &Expr) -> Option<(Expr, Expr, Vec<TreeStep<'_>
     if !holds_write(&rest) {
         return None;
     }
+    // A metadata write that is not a pipe stage of the rest (inside another write's right side,
+    // say) is the refusal's to report, not this route's.
+    let mut stages = Vec::new();
+    flatten_pipe_stages(&rest, &mut stages);
+    if reachable_meta_assigns(&stages) != count_meta_assigns(&rest) {
+        return None;
+    }
     // What a write reads of the node it is on (`key`, `path`, `parent`, `line`, a comment) is
     // answered from the node's place in the document, which the navigated snapshot has not got.
     if reads_node_context(&rest) || !is_alias_sensitive_assign(&rest) {
@@ -6244,8 +6251,9 @@ fn evaluate_yaml_cursor<W: AsRef<[u64]> + Clone>(
     strip_style: bool,
     sort_keys: bool,
 ) -> Result<Vec<ResultWithComments>> {
-    // A metadata write behind a static navigation (#2679) is the write on the navigated node,
-    // run as the document it is: only when the node is there to be navigated to. The presentation
+    // A write behind a static navigation (#2679 for a metadata write, #5286 for any other) is the
+    // write on the navigated node, run as the document it is: only when the node is there to be
+    // navigated to. The presentation
     // it starts from is the parent walk's own, which holds what only the walk can see (a comment
     // after a sequence item's `-`), not a snapshot taken from the node alone.
     //
@@ -6266,19 +6274,21 @@ fn evaluate_yaml_cursor<W: AsRef<[u64]> + Clone>(
                     let Some(whole) = sink.materialize(DiagStyle::Yq, whole, &no_location()) else {
                         return Ok(Vec::new());
                     };
-                    descend_value_and_tree(&whole.0, &whole.1, &steps)
+                    descend_value_and_tree(&whole.0, &whole.1, &steps).map(Some)
                 } else {
-                    None
+                    Some(None)
                 };
-                return evaluate_yaml_cursor_core(
-                    navigated,
-                    &rest,
-                    sink,
-                    need_comments,
-                    strip_style,
-                    sort_keys,
-                    pristine,
-                );
+                if let Some(pristine) = pristine {
+                    return evaluate_yaml_cursor_core(
+                        navigated,
+                        &rest,
+                        sink,
+                        need_comments,
+                        strip_style,
+                        sort_keys,
+                        pristine,
+                    );
+                }
             }
         }
     }
