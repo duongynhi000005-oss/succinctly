@@ -4361,6 +4361,8 @@ pub fn run_jq(mut args: JqCommand) -> Result<i32> {
                 Err(unopenable) => return Ok(report_unopenable_input(&unopenable)),
             }
         };
+        // #5291: jq skips a BOM at the start of its input, `--validate` included.
+        strip_leading_json_bom(raw_inputs.iter_mut());
         // #4305: see [`stitch_json_file_seams`]. Not under `--validate`, which is strict per file.
         let mut seams = if args.validate {
             Vec::new()
@@ -5425,6 +5427,10 @@ fn get_inputs(
     // JSON input mode is the only mode that runs the strict validator at all
     // -- `-R`, `--seq` and DSV never do, and must not start now.
     let json_input_mode = args.input_dsv.is_none() && !args.raw_input && !args.seq;
+    if json_input_mode {
+        // #5291: jq skips a BOM at the start of its input.
+        strip_leading_json_bom(raw_bytes.iter_mut().map(|(_, raw)| raw));
+    }
     // #4305: jq reads every input file as one byte stream, so a token still open at the end of
     // a file continues in the next one.
     // `--validate` is strict per file (an empty file is rejected too), so it reads the files as
@@ -6619,6 +6625,28 @@ fn read_file_bytes(path: &Path) -> std::result::Result<Vec<u8>, InputFileOpenErr
     std::fs::read(path).map_err(|e| InputFileOpenError::new(path, strerror_only(&e)))
 }
 
+/// Skip the UTF-8 byte-order mark at the front of the JSON input stream (#5291).
+///
+/// jq's parser consumes a leading `EF BB BF` before it looks at a token
+/// (`jv_parser_set_buf`), so a BOM-prefixed file (PowerShell's `Out-File`,
+/// Notepad, .NET serializers) parses like the same file without it. The
+/// parser is one for the whole run, over every input file as a single byte
+/// stream (#4305), so only the very start of the stream is skipped: a BOM at
+/// the front of a later file is a byte in the middle of a value there, and
+/// stays one. An empty file contributes no bytes, so the BOM may sit at the
+/// front of the first file that has any.
+///
+/// `-R` and `--seq` never come through here: raw input is never parsed, and
+/// the `--seq` reader accounts for the BOM itself (`bom_prefix`), including
+/// the malformed forms.
+fn strip_leading_json_bom<'a>(raws: impl Iterator<Item = &'a mut Vec<u8>>) {
+    if let Some(first) = raws.into_iter().find(|raw| !raw.is_empty()) {
+        if first.starts_with(crate::front_matter::UTF8_BOM) {
+            first.drain(..crate::front_matter::UTF8_BOM.len());
+        }
+    }
+}
+
 /// A main input file [`read_file_bytes`] couldn't open (#3098).
 ///
 /// jq reports an unreadable main input with `jq: error: Could not open file
@@ -7684,7 +7712,12 @@ fn find_literal_end(bytes: &[u8], pos: usize) -> Option<usize> {
 /// the rejection was a divergence only `--argjson`/`--jsonargs` still
 /// carried.
 fn parse_json_value(s: &str) -> Result<OwnedValue> {
-    let s = s.trim();
+    // #5291: jq's parser skips a leading BOM here too, but a BOM-only text is still not JSON.
+    let s = s
+        .strip_prefix('\u{feff}')
+        .filter(|rest| !rest.trim().is_empty())
+        .unwrap_or(s)
+        .trim();
     if s.is_empty() {
         return Ok(OwnedValue::Null);
     }
@@ -7739,7 +7772,9 @@ fn parse_json_value(s: &str) -> Result<OwnedValue> {
 /// the main input path's cross-check invariant above still holds -- it
 /// still never diverges, just via equality now instead of strict subset.
 fn parse_json_stream(s: &str) -> Result<Vec<OwnedValue>> {
-    let s = s.trim();
+    // #5291: jq's parser skips a leading BOM before anything else, so whitespace ahead of one
+    // leaves it standing, to be refused.
+    let s = s.strip_prefix('\u{feff}').unwrap_or(s).trim();
     if s.is_empty() {
         return Ok(vec![]);
     }
@@ -12445,6 +12480,35 @@ mod tests {
         ] {
             assert!(!token_runs_to_end(whole));
         }
+    }
+
+    /// #5291: only the front of the whole stream loses a BOM -- the first file with any bytes,
+    /// not every file -- and a partial or doubled one is left for the parser to refuse.
+    #[test]
+    fn strip_leading_json_bom_skips_it_once_at_the_stream_front_5291() {
+        let stripped = |files: &[&[u8]]| -> Vec<Vec<u8>> {
+            let mut raws: Vec<Vec<u8>> = files.iter().map(|f| f.to_vec()).collect();
+            strip_leading_json_bom(raws.iter_mut());
+            raws
+        };
+        assert_eq!(stripped(&[b"\xEF\xBB\xBF{}"]), vec![b"{}".to_vec()]);
+        // An empty file ahead of it contributes nothing, so the BOM is still the stream's front.
+        assert_eq!(
+            stripped(&[b"", b"\xEF\xBB\xBF1"]),
+            vec![b"".to_vec(), b"1".to_vec()]
+        );
+        // A BOM at the front of a later file is a byte inside the stream.
+        assert_eq!(
+            stripped(&[b"1", b"\xEF\xBB\xBF2"]),
+            vec![b"1".to_vec(), b"\xEF\xBB\xBF2".to_vec()]
+        );
+        assert_eq!(
+            stripped(&[b"\xEF\xBB\xBF\xEF\xBB\xBF1"]),
+            vec![b"\xEF\xBB\xBF1".to_vec()]
+        );
+        assert_eq!(stripped(&[b"\xEF\xBB1"]), vec![b"\xEF\xBB1".to_vec()]);
+        assert_eq!(stripped(&[b"\xEF\xBB\xBF"]), vec![b"".to_vec()]);
+        assert_eq!(stripped(&[]), Vec::<Vec<u8>>::new());
     }
 
     /// #4305: the tail moves onto the next file, through an empty one, and the last file
