@@ -83,6 +83,7 @@ fn not_found(dir: &tempfile::TempDir, args: &[&str], name: &str) -> Result<()> {
 }
 
 #[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object literals read like format arguments
 fn test_search_metadata_replaces_the_default_list_5338() -> Result<()> {
     let dir = fixture()?;
     let abs = format!(
@@ -154,6 +155,7 @@ fn test_search_metadata_replaces_the_default_list_5338() -> Result<()> {
 }
 
 #[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object literals read like format arguments
 fn test_search_metadata_that_finds_nothing_is_module_not_found_5338() -> Result<()> {
     let dir = fixture()?;
     for filter in [

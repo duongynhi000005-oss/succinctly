@@ -627,9 +627,9 @@ struct Target<'a> {
     search: Option<Vec<PathBuf>>,
 }
 
+#[cfg(test)]
 impl<'a> Target<'a> {
     /// A directive without `search` metadata, resolved on the default list.
-    #[cfg(test)]
     const fn plain(path: &'a str) -> Self {
         Self { path, search: None }
     }
