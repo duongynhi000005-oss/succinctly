@@ -464,10 +464,9 @@ object values `{a: (1,2)}` (#354), computed object keys `{(("a","b")): 1}`,
 builtin (#1279). Before #462 several of these were parse errors rather than
 wrong answers, since the comma could not be written without parens.
 
-**Computed keys in brackets** (#360) accept any expression, but two jq behaviours are not reproduced:
-
-- **A slice bound that has to be evaluated is still a parse error.** Both bounds accept the same spellings — `.[1:3]`, `.[(1):3]`, `.[1:(3)]`, `.[1.0:3]` — but nothing dynamic: `.[$a:$b]` and `.[(1+1):]` are parse errors, where jq accepts them.
-- **An array-valued key is jq's subarray search.** `[10,20,30] | .[[20]]` returns `[1]` (as do `indices`, `index`, `rindex` and `getpath([[20]])`, #3453, #2429); `path(.[[20]])` is `[[20]]` and every write through it raises `Cannot update field at array index of array`, as in jq (#3506). `succinctly yq` keeps refusing the key form, as real yq does.
+**Computed keys in brackets** (#360) accept any expression, a slice bound that has to be evaluated among them — `.[$a:$b]`, `.[(1+1):]`, `.[:$b]` — as jq does.
+An array-valued key is jq's subarray search: `[10,20,30] | .[[20]]` returns `[1]` (as do `indices`, `index`, `rindex` and `getpath([[20]])`, #3453, #2429); `path(.[[20]])` is `[[20]]` and every write through it raises `Cannot update field at array index of array`, as in jq (#3506).
+`succinctly yq` keeps refusing the key form, as real yq does.
 
 A NaN key reads as `null` and names a path component, as in jq: `path(.[nan])` is `[null]`, and only a write that reaches it refuses, with `Cannot set array element at NaN index` (#5245). A delete through it (`del(.[nan])`, `.[nan] |= empty`) has nothing to delete: jq leaves a `null` or absent parent as it is and never returns on an array, so here the document stays as it is, whether the key is a literal or held in a variable.
 
@@ -480,8 +479,6 @@ A **float slice bound keeps its own spelling** too, matching jq (#1326, followin
 A computed key **after a multi-output path component** — `path(.. | .[.k])`, `path(recurse | .[.k])`, `path(.. | objects | .[.k])` — resolves per branch, same as `path(.[] | .[.k])` (#412: `..` and bare `recurse` share one resolver, `recurse(f)`/`recurse(f; cond)` follow the value path's stack, and the typeof filters (`select`, `objects`, `arrays`, `values`, ...) each got a path-tracking arm). `getpath` with a multi-output argument resolves per output too, since #1279 gave `resolve_node`'s `GetPath` arm one branch per output: `path(getpath((["a"],["b"])))` is `["a"]` then `["b"]`, and writes through it (`|=`, `=`, `del`) reach both. A multi-output component with none of those shapes — an arbitrary generator like `range(3)` — is still refused, since naming the path components it produces would mean tracking components for a genuinely arbitrary expression; bare in `path(...)` this reports the same `Invalid path expression with result <v>` wording (#891) real jq itself uses, naming the first output (jq's own per-output check never even learns whether a second output would have existed) — used as an assignment *target* for further indexing, jq instead uses its "near attempt to access element ... of ..." wording, not yet reproduced here (#989).
 
 `recurse(f)` for an `f` that keeps yielding null stops rather than descending, matching `[recurse(f)]` and bounding a walk jq does not bound at all: `recurse(.a?)` over `{"a":null}` reads null from null forever, and jq runs until it cannot allocate. In the other direction, `[recurse(f)]` descends into an array `f` returns where jq stops at the array itself; in a *path* context succinctly stops at the array, i.e. follows jq rather than its own value path.
-
-**Indexing by a variable bound from a generator does not work yet** (#397). `.[$k]` itself is fine, but `keys[] as $k | .[$k]` — the most common way to reach it — binds `$k` to the whole array rather than each element. The bracket syntax is not at fault, and neither is `as`: iterating a *computed* value collapses the stream into a single array before the binding ever happens, so `[keys[]]` is already `[["a","b"]]` rather than `["a","b"]`. Explicit bindings (`--arg k a`, `. as $x | $x[…]`, `def f($k): .[$k]`) and iteration of a value navigated out of the document (`.[]`) are unaffected.
 
 See [jq Remaining Work](../plan/jq-remaining.md) for incomplete CLI and module system features.
 
@@ -509,14 +506,7 @@ divergences (`inputs | f` does not interleave) are recorded in
 
 1. **Variable scoping** - May not perfectly match jq edge cases
 2. **Error messages** - byte-identical to jq-1.7.1 across the probe corpus in `tests/data/jq-error-probes.tsv`, bar the probes on which succinctly raises no error at all; those and the reverse case (succinctly errors where jq answers) are enumerated in [jq Known Limitations](../compliance/jq/limitations.md)
-3. **Numeric overflow** - Uses wrapping arithmetic
-4. **`$ENV` as bare object** - Only field access works (`$ENV.VAR`)
-5. **Number equality above 2^53** - `1 == 1.0` is `true` as in jq, but a mixed
-   integer/float comparison widens the integer to `f64`, while jq 1.7 retains
-   the decimal literal. They agree on every value representable exactly as an
-   `f64`; beyond that `9007199254740993 == 9007199254740992.0` is `true` here
-   and `false` in jq
-6. **Regex `l`/`n` flags** - `l` (POSIX leftmost-longest matching) is accepted
+3. **Regex `l`/`n` flags** - `l` (POSIX leftmost-longest matching) is accepted
    as valid flag syntax but has no effect (`match("a|aa|aaa";"l")` returns
    `"a"`, not real jq's `"aaa"`); `n` (suppress empty matches) has a narrower
    gap for lazy quantifiers and empty-first alternations, where a non-empty
