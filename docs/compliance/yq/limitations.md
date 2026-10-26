@@ -5741,18 +5741,17 @@ Four known gaps this write shares with every other write form, none specific to 
   existing alias and merge-key behaviour, not specific to the tail.
 - **A multi-result filter carries no `CommentTree` at all** (`.a line_comment = "y" | .,
   .` prints two uncommented copies) — #1349's `GenericResult::Many` limitation, above.
-- **A metadata write behind a navigation stage is refused, where real yq applies it**: `.a |
-  .b line_comment = "hi"` on `a:\n  b: 1\n` prints `b: 1 # hi` in yq (live-verified) and
-  raises here (#2679). `resolve_meta_assign_writes` only runs when the whole expression
-  passes `is_shape_preserving` (`src/jq/eval.rs`), whose fixed operator list has no bare
-  navigation stage, and a write after one belongs on the navigated subtree, which no route
-  here has a presentation tree for. It used to exit 0 with the write silently dropped, the
-  outcome #798's triage ruled out; the refusal is the divergence ADR-0018 allows when matching
-  would discard a write. A leading user-defined `def` that a stage ahead of the write reads
-  through (`def f: .; f | .a line_comment = "hi"`) is refused the same way, since each stage
-  is re-evaluated alone with no `def` in scope; real yq has no `def`, so there is no oracle.
-  Pinned by `metadata_write_behind_navigation_or_def_is_refused_not_dropped_2679`.
-  Applying the write (tracking the navigated prefix through the pass) is what is left of #2679.
+- **A metadata write behind a navigation that is not a static path is refused, where real yq applies it**:
+  `.a[] | .b line_comment = "hi"` on `a:\n  - b: 1\n` prints `b: 1 # hi` in yq (live-verified) and raises here (#2679).
+  A static path (`.a`, `.a.b`, `.[0]`, a pipe of them) is applied: the rest of the pipe runs on the navigated node as a document of its own, with that subtree's presentation, as `.a | .b line_comment = "hi"` does in yq.
+  A write that reads the node's own context (`.a | .b line_comment = (key)`, `path`, `parent`, `line`, `column`, a comment, style, anchor or tag) is refused as well, since the navigated snapshot cannot answer it.
+  A path whose node is absent (`.zz | .b line_comment = "x"`, where yq writes onto the `null` it leaves) and a navigation that answers several nodes (`.[]`, `.a[]`) are refused.
+  `resolve_meta_assign_writes` only runs when the whole expression passes `is_shape_preserving` (`src/jq/eval.rs`), whose fixed operator list has no bare navigation stage, and a write after one belongs on the navigated subtree, which no route here has a presentation tree for.
+  Such a write used to exit 0 with the write silently dropped, the outcome #798's triage ruled out; the refusal is the divergence ADR-0018 allows when matching would discard a write.
+  A leading user-defined `def` that a stage ahead of the write reads through (`def f: .; f | .a line_comment = "hi"`) is refused the same way, since each stage is re-evaluated alone with no `def` in scope; real yq has no `def`, so there is no oracle.
+  A document that holds an alias anywhere is refused too (`.y | .m line_comment = "kk"` on `x: &k\n  m: 1\ny: *k\n`): the navigated node can be an alias, or hold one whose anchor lies outside it, and yq prints those as `*k`, which is unreadable on its own and which a root `*name` never is here.
+  Pinned by `metadata_write_behind_navigation_or_def_is_refused_not_dropped_2679` and `tests/yq_cli/i2679.rs`.
+  Presentation a *non-metadata* write loses behind a navigation (`.a | .b = 5` drops the subtree's comments and flow style, where yq keeps them) is the same gap, still open.
   [#2855](https://github.com/rust-works/succinctly/issues/2855)'s `sort_keys(f)` hits this
   same gap through a value, not just a comment: `.a | sort_keys(.)` correctly reorders
   `.a`'s own keys and returns just `.a` (matching real yq), but loses `.a.y`'s flow style —
