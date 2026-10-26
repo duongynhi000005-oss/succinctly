@@ -12819,6 +12819,13 @@ A module whose last item is a lone `.` (`def f: 1; .`) is accepted, where jq rep
 The wording of the parse error, and of `Module metadata must be an object`, is succinctly's own, the same fidelity limit as a module's syntax error above.
 Both are tracked in [#5344](https://github.com/rust-works/succinctly/issues/5344).
 
+### `~/.jq`'s own directives load like a module's (#5339)
+
+A `~/.jq` file may `import` and `include` modules and data files, searching the current directory and then `-L`.
+What they bring in is private to the file: the main program sees its defs and neither its namespaces nor its data bindings.
+A directive that fails to load is a compile error, reported after the program's own, as in jq.
+A syntax error or a main expression in the `~/.jq` file itself is still silently accepted, where jq refuses to compile ([#5351](https://github.com/rust-works/succinctly/issues/5351)).
+
 ### Module-scope gaps that are genuinely open
 
 Found while closing #2865, filed rather than recorded as divergences: a dependency named

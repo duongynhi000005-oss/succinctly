@@ -1428,7 +1428,13 @@ impl ModuleLoader {
         self.loading.pop();
         let (deps, data_bindings) = match deps {
             Ok(deps) => deps,
-            Err(e) => return Err(self.failure_report(&home.program, e)),
+            Err(e) => {
+                let report = self.failure_report(&home.program, e);
+                // Kept, so a second call reports the same failure instead of finding nothing
+                // to load and carrying on without `~/.jq`'s defs.
+                self.pending_home = Some(home);
+                return Err(report);
+            }
         };
         let (defs, _) = Self::bind_module_defs(
             home.program,
@@ -1778,11 +1784,13 @@ impl ModuleLoader {
     /// [`Self::process_program`] documents for the top level, which is why
     /// both go through `wrap_defs`.
     ///
-    /// `~/.jq` is deliberately **not** included here: its defs are not visible
+    /// `~/.jq`'s defs are deliberately **not** among them: they are not visible
     /// inside a module body in real jq (`def uh: hj;` in a module reports
     /// `hj/0 is not defined` even with `def hj: 1234;` in `~/.jq`). They still
     /// leak in today through the top-level chain -- a separate, pre-existing
-    /// gap this fix neither widens nor closes.
+    /// gap this fix neither widens nor closes. `~/.jq`'s *own* directives go
+    /// through here too, as a module's do, with [`AUTO_LOAD_RUN_ID`] as `own_id`
+    /// ([`Self::ensure_home_bound`], #5339).
     fn module_dep_defs(
         &mut self,
         program: &Program,
@@ -2016,11 +2024,13 @@ impl ModuleLoader {
         // A `~/.jq` with directives of its own is loaded after the program's (#5339), and its
         // defs are in scope like any other `~/.jq`'s.
         self.ensure_home_bound()?;
-        names.extend(
-            self.auto_loaded_defs
-                .iter()
-                .map(|(name, _, _)| name.clone()),
-        );
+        if self.home_bound {
+            names.extend(
+                self.auto_loaded_defs
+                    .iter()
+                    .map(|(name, _, _)| name.clone()),
+            );
+        }
         Ok(names)
     }
 
@@ -11748,6 +11758,20 @@ mod tests {
             loader.top_ids = vec![(0, 1), (1, 3), (2, 2)];
             let rank = loader.error_report_rank();
             assert_eq!(rank, BTreeMap::from([(2, 0), (3, 1), (1, 2)]));
+        }
+
+        /// #5339: a `~/.jq` with directives is walked as one more top-level entry, after every
+        /// directive of the program's, including the one declared first.
+        #[test]
+        fn a_home_file_is_walked_after_the_programs_directives() {
+            let mut loader = ModuleLoader::new(&[]);
+            loader.deps_of.insert(AUTO_LOAD_RUN_ID, vec![(0, 7)]);
+            loader.top_ids = vec![(0, 1), (1, 2), (0, AUTO_LOAD_RUN_ID)];
+            let rank = loader.error_report_rank();
+            assert_eq!(
+                rank,
+                BTreeMap::from([(2, 0), (1, 1), (7, 2), (AUTO_LOAD_RUN_ID, 3)])
+            );
         }
 
         /// A module's dependencies come before it, last-declared first, and a

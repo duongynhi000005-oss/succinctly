@@ -40,6 +40,8 @@ fn fixture() -> Result<tempfile::TempDir> {
     std::fs::create_dir(p.join("lib"))?;
     std::fs::write(p.join("m.jq"), "def a: \"cwd\";")?;
     std::fs::write(p.join("d.json"), "[7]\n")?;
+    std::fs::write(p.join("shadow.jq"), "def length: 99;")?;
+    std::fs::write(p.join("synerr.jq"), "def f: 1 +;")?;
     std::fs::write(p.join("lib/k.jq"), "def k: \"k\";")?;
     std::fs::write(p.join("lib/n.jq"), "import \"m\" as m; def b: m::a;")?;
     Ok(dir)
@@ -109,6 +111,14 @@ fn test_home_file_directives_bind_privately_5339() -> Result<()> {
             String::new(),
             0,
         ),
+        // A def the file includes shadows a builtin inside the file's own bodies only.
+        (
+            "include \"shadow\"; def hb: [1,2]|length;",
+            vec!["[hb, ([1,2]|length)]"],
+            "[99,2]\n",
+            String::new(),
+            0,
+        ),
         // All three kinds together, and a dependency's own dependency.
         (
             "import \"m\" as hm; import \"d\" as $dd; include \"k\"; def hb: [hm::a, $dd, k];",
@@ -143,6 +153,15 @@ fn test_home_file_directive_failure_is_a_compile_error_5339() -> Result<()> {
     let (stdout, stderr, code) =
         run_with_home(cwd, "import \"nonexistent\" as n; def hb: 1;", &["1"])?;
     assert_eq!((stdout.as_str(), stderr.as_str(), code), ("", missing, 3));
+
+    // A module that does not parse is a compile error too (its wording is succinctly's own).
+    let (stdout, stderr, code) = run_with_home(cwd, "include \"synerr\"; def hb: 1;", &["1"])?;
+    assert_eq!((stdout.as_str(), code), ("", 3), "{stderr}");
+    assert!(
+        stderr.contains("synerr.jq, line 1:\ndef f: 1 +;")
+            && stderr.ends_with("jq: 1 compile error\n"),
+        "{stderr}"
+    );
 
     // The program's own failure is the one reported, not `~/.jq`'s.
     let (stdout, stderr, code) = run_with_home(
