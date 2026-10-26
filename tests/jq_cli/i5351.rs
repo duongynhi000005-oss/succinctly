@@ -99,6 +99,7 @@ fn test_dot_jq_that_does_not_parse_is_a_compile_error_5351() -> Result<()> {
 }
 
 #[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object literals read like format arguments
 fn test_dot_jq_without_a_fault_is_untouched_5351() -> Result<()> {
     // Nothing, blanks, a comment, a module header and plain defs are all libraries.
     for dot_jq in [

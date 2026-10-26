@@ -12277,6 +12277,7 @@ mod tests {
                     ReportEntry::Cycle { .. } => "C",
                     ReportEntry::Syntax { .. } => "S",
                     ReportEntry::Data(_) => "D",
+                    ReportEntry::MainExpression => "X",
                 })
                 .collect();
             (kinds, e.errors)
@@ -12289,6 +12290,27 @@ mod tests {
                 failure("import \"bad\" as $d; include \"syn\"; 1"),
                 (vec!["S", "D"], 2)
             );
+        }
+
+        /// #5351: a module with a main expression is one entry, counted once, and the walk goes on.
+        #[test]
+        fn a_module_with_a_main_expression_reports_the_walk() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::write(dir.path().join("syn.jq"), "def f: 1 +;\n").expect("write syn");
+            std::fs::write(dir.path().join("main.jq"), "def f: 1; f\n").expect("write main");
+            let mut loader = ModuleLoader::new(&[dir.path().to_path_buf()]);
+            let program = jq::parse_program("include \"main\"; include \"syn\"; 1").expect("parse");
+            let e = loader.process_program(&program).expect_err("must fail");
+            let kinds: Vec<&str> = e
+                .entries
+                .iter()
+                .map(|entry| match entry {
+                    ReportEntry::Syntax { .. } => "S",
+                    ReportEntry::MainExpression => "X",
+                    _ => "?",
+                })
+                .collect();
+            assert_eq!((kinds, e.errors), (vec!["S", "X"], 2));
         }
 
         #[test]

@@ -10036,6 +10036,7 @@ mod tests {
     /// same tree, so `has_main_expr` is what tells a library that may be loaded from one that
     /// jq refuses.
     #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // jq object literals read like format arguments
     fn program_records_whether_a_main_expression_follows_the_definitions_5351() {
         for (text, has_main) in [
             ("", false),
