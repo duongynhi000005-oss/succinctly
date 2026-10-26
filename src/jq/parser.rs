@@ -519,6 +519,44 @@ fn is_assignment_expr(expr: &Expr) -> bool {
     }
 }
 
+/// Whether `expr` yields exactly one value on every input -- a conservative syntactic check,
+/// `false` for anything it cannot see through (a call, a generator, an iteration). A string
+/// interpolation is one when every `\(E)` is (#5298).
+fn is_surely_single_valued(expr: &Expr) -> bool {
+    match expr {
+        Expr::Identity
+        | Expr::Field(_)
+        | Expr::Index { .. }
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::TrackedVar(_)
+        | Expr::Format(_)
+        | Expr::Not
+        // An array collects whatever its body yields into one value.
+        | Expr::Array(_) => true,
+        Expr::Paren(inner) | Expr::Negate(inner) => is_surely_single_valued(inner),
+        Expr::Pipe(stages) => stages.iter().all(is_surely_single_valued),
+        Expr::Arithmetic { left, right, .. } | Expr::Compare { left, right, .. } => {
+            is_surely_single_valued(left) && is_surely_single_valued(right)
+        }
+        Expr::StringInterpolation(parts) => parts.iter().all(|part| match part {
+            StringPart::Literal(_) => true,
+            StringPart::Expr(inner) => is_surely_single_valued(inner),
+        }),
+        Expr::Builtin(
+            Builtin::ToString
+            | Builtin::Length
+            | Builtin::Type
+            | Builtin::AsciiDowncase
+            | Builtin::AsciiUpcase
+            | Builtin::Floor
+            | Builtin::Ceil
+            | Builtin::Round,
+        ) => true,
+        _ => false,
+    }
+}
+
 /// The one definition of what `$name` (the `$` already consumed) desugars
 /// to: jq's two pseudo-variables, `$__loc__`/`$ENV`, get their own
 /// dedicated node; every other name is an ordinary bound-variable
@@ -2588,12 +2626,18 @@ impl<'a> Parser<'a> {
                 let entry = if yq_entry {
                     self.parse_yq_object_entry()?
                 } else {
+                    let mut string_key: Option<Expr> = None;
                     let (key, dollar_shorthand_value) = if self.peek() == Some('(') {
                         // Dynamic key: (expr)
                         self.next();
                         let key_expr = self.parse_expr()?;
                         self.expect(')')?;
                         (ObjectKey::Expr(Box::new(key_expr)), None)
+                    } else if let Some(key_string) = self.try_parse_interpolated_key()? {
+                        // #5298: jq's `String` production, with an interpolation or a format.
+                        // Its shorthand (`{"a\(1)"}`) is `{"a1": .["a1"]}`, the string read twice.
+                        string_key = Some(key_string.clone());
+                        (ObjectKey::Expr(Box::new(key_string)), None)
                     } else if self.peek() == Some('"') {
                         // String key
                         let s = self.parse_string_literal()?;
@@ -2641,6 +2685,22 @@ impl<'a> Parser<'a> {
                         self.next();
                         self.skip_ws();
                         self.parse_object_value()?
+                    } else if let Some(key_string) = string_key {
+                        // #5298: `{"a\(1)"}` is `{"a\(1)": .["a\(1)"]}`. jq reads the key once and
+                        // indexes with that value, so an interpolation that could yield several
+                        // would pair each key with its own value; reading the string twice, as
+                        // this does, would pair every key with every value. Only a string that
+                        // is surely one value takes the shorthand.
+                        if !is_surely_single_valued(&key_string) {
+                            return Err(ParseError::new(
+                                "an interpolated object key written without a value must be a single value; write the value out",
+                                self.pos,
+                            ));
+                        }
+                        Expr::IndexExpr {
+                            target: Box::new(Expr::Identity),
+                            key: Box::new(key_string),
+                        }
                     } else {
                         // Shorthand: key must be literal identifier
                         match &key {
@@ -2873,6 +2933,52 @@ impl<'a> Parser<'a> {
     /// The restriction is jq-mode only. Real yq parses the same position as a
     /// full expression, and its own precedence ranks `and`/`or` above `:` and
     /// `,` -- see `parse_pipe_no_comma_with_booleans` (#2506).
+    /// Whether the string literal at the cursor holds an interpolation (`\(`), without consuming it.
+    fn string_literal_has_interpolation(&self) -> bool {
+        let bytes = self.input.as_bytes();
+        let mut i = self.pos + 1;
+        while let Some(&b) = bytes.get(i) {
+            match b {
+                b'\\' => {
+                    if bytes.get(i + 1) == Some(&b'(') {
+                        return true;
+                    }
+                    i += 2;
+                }
+                b'"' => return false,
+                _ => i += 1,
+            }
+        }
+        false
+    }
+
+    /// An object key that is a string with an interpolation, or a format applied to a string
+    /// (`"a\(.k)"`, `@base64 "a\(.k)"`), as jq's `String` production allows (#5298); jq mode only.
+    /// `None`, with the cursor where it was, for a key that is anything else: a plain string stays
+    /// [`ObjectKey::Literal`], and a bare `@name` is no key.
+    fn try_parse_interpolated_key(&mut self) -> Result<Option<Expr>, ParseError> {
+        if self.mode != ParserMode::Jq {
+            return Ok(None);
+        }
+        match self.peek() {
+            Some('"') if self.string_literal_has_interpolation() => {
+                self.parse_string_or_interpolation().map(Some)
+            }
+            Some('@') => {
+                let start = self.pos;
+                let format = self.parse_format_string()?;
+                self.skip_ws();
+                if self.peek() != Some('"') {
+                    self.pos = start;
+                    return Ok(None);
+                }
+                let string = self.parse_string_or_interpolation()?;
+                Ok(Some(Self::apply_format_to_interpolation(string, &format)))
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn parse_object_value(&mut self) -> Result<Expr, ParseError> {
         match self.mode {
             ParserMode::Jq => self.parse_expd_value(),
@@ -11564,6 +11670,55 @@ mod tests {
             matches!(&jq, Expr::Alternative(left, _) if matches!(left.as_ref(), Expr::AlternativeAssign { .. })),
             "{jq:?}"
         );
+    }
+
+    /// #5298: an interpolated or formatted string is an object key, and with no value it is
+    /// shorthand for indexing with itself -- when it is surely one value.
+    #[test]
+    fn interpolated_string_object_keys_5298() {
+        let jq = |source: &str| parse_with_mode(source, ParserMode::Jq);
+        for source in [
+            r#"{"a\(1)": 2}"#,
+            r#"{@base64 "x\(.k)": 2}"#,
+            r#"{"a\(1,2)": 3}"#,
+        ] {
+            let Ok(Expr::Object(entries)) = jq(source) else {
+                panic!("`{source}` is not an object");
+            };
+            assert!(matches!(entries[0].key, ObjectKey::Expr(_)), "{source}");
+        }
+        for source in [
+            r#"{"a\(1)"}"#,
+            r#"{@base64 "x\(.k)"}"#,
+            r#"{"p\(.a|tostring)\(.b + 1)"}"#,
+        ] {
+            let Ok(Expr::Object(entries)) = jq(source) else {
+                panic!("`{source}` is not an object");
+            };
+            assert!(matches!(entries[0].key, ObjectKey::Expr(_)), "{source}");
+            assert!(
+                matches!(&entries[0].value, Expr::IndexExpr { target, .. } if **target == Expr::Identity),
+                "{source}"
+            );
+        }
+        for source in [
+            r#"{"a\(1,2)"}"#,
+            r#"{"a\(.xs[])"}"#,
+            r#"{"a\(empty)"}"#,
+            r#"{"a\(foo)"}"#,
+        ] {
+            let error = jq(source).expect_err(source);
+            assert!(
+                error.to_string().contains("must be a single value"),
+                "{source}: {error}"
+            );
+        }
+        // A bare format is no key, and a plain string key is still a literal one.
+        assert!(jq("{@base64}").is_err());
+        assert!(matches!(
+            jq(r#"{"a"}"#),
+            Ok(Expr::Object(entries)) if matches!(&entries[0].key, ObjectKey::Literal(name) if name == "a")
+        ));
     }
 
     #[test]

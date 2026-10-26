@@ -418,6 +418,12 @@ The count argument of `limit`/`skip`/`nth` accepts a full expression, including
 a comma generator without extra parentheses (#2863). `skip`'s generator-count
 limitation is recorded in [jq limitations](../compliance/jq/limitations.md#skip-with-a-generator-count).
 
+Object-construction keys may be an identifier, a string, an interpolated string or a format applied to one
+(`{"a\(.k)": 1}`, `{@base64 "x\(.k)"}`), a `$name`, or a parenthesised expression (#5298). A key that is a string
+and has no value is shorthand for indexing with it, `{"a\(.k)"}` being `{("a\(.k)"): .["a\(.k)"]}`; see the
+[limitations](../compliance/jq/limitations.md#an-interpolated-shorthand-object-key-that-may-yield-several-values-5298)
+for the one form refused.
+
 Object-construction values use jq's restricted `ExpD` production, where
 `,` separates entries: `{a: 1, b: 2}` is two entries; write `{a: (1,2)}` to
 fan a value out. The restriction is the full one (#3105), not just the
