@@ -88466,7 +88466,9 @@ pub mod cli_context {
 
     #[cfg(feature = "std")]
     mod state {
+        use super::ModuleResolver;
         use super::ProgramContext;
+        use alloc::rc::Rc;
         use alloc::string::String;
         use alloc::vec::Vec;
         use std::cell::{Cell, RefCell};
@@ -88479,8 +88481,27 @@ pub mod cli_context {
             // The source of the document in hand, for the routes that do not
             // read through the `input` queue.
             pub(super) static CURRENT_SOURCE: Cell<Option<u32>> = const { Cell::new(None) };
+            // `modulemeta`'s module resolver (#5321).
+            pub(super) static MODULE_RESOLVER: RefCell<Option<Rc<ModuleResolver>>> = const { RefCell::new(None) };
         }
     }
+
+    /// What the CLI's module resolver answers for one `modulemeta` input (#5321).
+    #[derive(Clone, Debug)]
+    pub enum ModuleMetaOutcome {
+        /// The module's metadata, with its `deps` and `defs` appended.
+        Meta(OwnedValue),
+        /// `error(message)`, which `try` and `?` catch: a path jq refuses, or a
+        /// module it cannot find.
+        Error(String),
+        /// The module was found but could not be loaded. jq prints this text to
+        /// stderr and answers `null` with exit 0 (it is not an error of the
+        /// filter), so it is carried as the exact bytes to print.
+        LoadFailure(String),
+    }
+
+    /// The CLI's `modulemeta` resolver: a module name in, its outcome out.
+    pub type ModuleResolver = dyn Fn(&str) -> ModuleMetaOutcome;
 
     /// Record the running program's context. Called once by the CLI.
     pub fn set_program(context: ProgramContext) {
@@ -88488,6 +88509,31 @@ pub mod cli_context {
         state::PROGRAM.with(|p| *p.borrow_mut() = Some(context));
         #[cfg(not(feature = "std"))]
         let _ = context;
+    }
+
+    /// Record how `modulemeta` resolves a module name. Called once by the CLI;
+    /// without it (a library embedding, yq mode) every name is `module not
+    /// found`, as it was before #5321.
+    pub fn set_module_resolver(resolver: impl Fn(&str) -> ModuleMetaOutcome + 'static) {
+        #[cfg(feature = "std")]
+        state::MODULE_RESOLVER.with(|r| *r.borrow_mut() = Some(alloc::rc::Rc::new(resolver)));
+        #[cfg(not(feature = "std"))]
+        let _ = resolver;
+    }
+
+    /// `modulemeta`'s answer for `name`, or `None` when no resolver is set.
+    pub(super) fn module_meta(name: &str) -> Option<ModuleMetaOutcome> {
+        #[cfg(feature = "std")]
+        {
+            // Cloned out so a resolver that re-enters the evaluator cannot find the cell borrowed.
+            let resolver = state::MODULE_RESOLVER.with(|r| r.borrow().clone())?;
+            Some(resolver(name))
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            let _ = name;
+            None
+        }
     }
 
     /// Record the file name for each input source tag (`None` for stdin).
@@ -93674,11 +93720,14 @@ fn bsearch_one_target<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 // Object functions
 
 /// Builtin: modulemeta - get module metadata for the input module name.
-/// Arity 0, matching real jq (#2035). succinctly has no real module system to
-/// describe, and real jq's `modulemeta` is not a no-op even so -- it always
-/// errors: a type-check error if `.` isn't a string, otherwise a
-/// module-not-found error citing the name, since there is never a module to
-/// actually resolve in this repo's single-file CLI/library context.
+/// Arity 0, matching real jq (#2035).
+///
+/// With the CLI's resolver set ([`cli_context::set_module_resolver`], #5321) a string input
+/// is searched for on the library directories like an `import`'s and the module's metadata,
+/// `deps` and `defs` come back. Without one -- a library embedding, which has no module
+/// search path, and yq mode -- there is never a module to resolve, and real jq's `modulemeta`
+/// is not a no-op even so -- it errors: a type-check error if `.` isn't a string, otherwise a
+/// module-not-found error citing the name.
 /// Verified live against jq 1.7.1: every input type errors, exit 5 --
 /// `null`/`123`/`true`/`[]`/`{}` all give "modulemeta input module name must
 /// be a string", any string (including `""`) gives "module not found: <name
@@ -93694,6 +93743,31 @@ fn builtin_modulemeta<W: Clone + AsRef<[u64]>>(
     value: StandardJson<'_, W>,
     optional: bool,
 ) -> QueryResult<'_, W> {
+    if let StandardJson::String(s) = &value {
+        // #5321: with the CLI's resolver set, the name is searched for like an
+        // `import`'s and the module's `deps`/`defs` come back.
+        let outcome = s
+            .as_str()
+            .ok()
+            .and_then(|name| cli_context::module_meta(&name));
+        match outcome {
+            Some(cli_context::ModuleMetaOutcome::Meta(meta)) => {
+                return QueryResult::Owned(meta);
+            }
+            Some(cli_context::ModuleMetaOutcome::LoadFailure(text)) => {
+                write_stderr(&text);
+                return QueryResult::Owned(OwnedValue::Null);
+            }
+            Some(cli_context::ModuleMetaOutcome::Error(message)) => {
+                return if optional {
+                    QueryResult::None
+                } else {
+                    QueryResult::Error(EvalError::new(message))
+                };
+            }
+            None => {}
+        }
+    }
     scalar_fallback(&value, optional, || match &value {
         StandardJson::String(s) => EvalError::new(format!(
             "module not found: {}",

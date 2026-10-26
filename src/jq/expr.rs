@@ -3,7 +3,6 @@
 #[cfg(not(test))]
 use alloc::boxed::Box;
 #[cfg(not(test))]
-use alloc::collections::BTreeMap;
 #[cfg(not(test))]
 use alloc::rc::Rc;
 #[cfg(not(test))]
@@ -12,8 +11,6 @@ use alloc::string::String;
 use alloc::vec;
 #[cfg(not(test))]
 use alloc::vec::Vec;
-#[cfg(test)]
-use std::collections::BTreeMap;
 #[cfg(test)]
 use std::rc::Rc;
 
@@ -1987,13 +1984,21 @@ impl Program {
 /// Module metadata declaration: `module { ... };`
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModuleMeta {
-    /// Metadata key-value pairs
-    pub metadata: BTreeMap<String, MetaValue>,
+    /// Metadata key-value pairs, in source order (#5321)
+    pub metadata: MetaObject,
 }
+
+/// A metadata object, its keys in the order they were written (#5321).
+///
+/// A repeated key keeps the position of its first spelling and the value of its last, as jq
+/// builds the object by setting one key after another; `modulemeta` prints it in that order.
+pub type MetaObject = Vec<(String, MetaValue)>;
 
 /// Values allowed in module metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MetaValue {
+    /// `null`
+    Null,
     /// String value
     String(String),
     /// Number value
@@ -2003,7 +2008,7 @@ pub enum MetaValue {
     /// Array of values
     Array(Vec<Self>),
     /// Nested object
-    Object(BTreeMap<String, Self>),
+    Object(MetaObject),
 }
 
 /// Import directive: `import "path" as name;` or `import "path" as name { meta };`
@@ -2028,7 +2033,7 @@ pub struct Import {
     /// otherwise still unimplemented; see #2956.
     pub data: bool,
     /// Optional metadata overrides
-    pub metadata: Option<BTreeMap<String, MetaValue>>,
+    pub metadata: Option<MetaObject>,
     /// Position of this directive among *all* `import`/`include` directives in
     /// the program, counting from 0 in true source order (#2857). The parser
     /// keeps `imports: Vec<Import>` and `includes: Vec<Include>` as two
@@ -2047,7 +2052,7 @@ pub struct Include {
     /// already ends in `.jq` is not stripped or treated specially here.
     pub path: String,
     /// Optional metadata overrides
-    pub metadata: Option<BTreeMap<String, MetaValue>>,
+    pub metadata: Option<MetaObject>,
     /// See [`Import::decl_index`] -- shared source-order counter over both
     /// kinds of directive.
     pub decl_index: usize,

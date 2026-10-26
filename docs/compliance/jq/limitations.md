@@ -12782,6 +12782,16 @@ fat-body defs of 50 terms, every one used and included: 585 ms to 28 ms on an Ap
 1.9 s to 57 ms on an AMD 7950X, output identical; 2000 of them run in 112 ms and 245 ms).
 Programs whose modules are only top-level, or only dependencies, are unchanged.
 
+### `modulemeta` answers from the module's header and `def`s, with two gaps in the header (#5321)
+
+`modulemeta` resolves its input like an `import` does, on the library directories alone, and answers the header metadata, then `deps` and `defs`.
+The current directory is not searched, as in jq: a `cw.jq` beside the invocation is `module not found: cw`.
+A module that is found but fails to load prints its diagnostic to stderr and answers `null` with exit 0, as jq does.
+Two things differ, both in the parts of a module that succinctly's parser reads more narrowly than jq's.
+A metadata value is a literal here (string, number, boolean, `null`, array, object), where jq takes any constant expression, so `module {a:(1+2)};` is a parse error here and `{"a":3,...}` in jq.
+The wording of the parse error, and of `Module metadata must be an object`, is succinctly's own, the same fidelity limit as a module's syntax error above.
+Both are tracked in [#5344](https://github.com/rust-works/succinctly/issues/5344).
+
 ### Module-scope gaps that are genuinely open
 
 Found while closing #2865, filed rather than recorded as divergences: a dependency named

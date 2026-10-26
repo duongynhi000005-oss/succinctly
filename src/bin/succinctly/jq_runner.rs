@@ -426,8 +426,25 @@ fn print_position_error(
     line_text: &str,
     column: usize,
 ) {
-    eprintln!("jq: error: {message} at {location}, line {line_no}:");
-    eprintln!("{line_text}{}", " ".repeat(column));
+    eprint!(
+        "{}",
+        position_error_text(message, location, line_no, line_text, column)
+    );
+}
+
+/// [`print_position_error`]'s two lines as text, for the one caller that has to carry them
+/// to stderr itself (`modulemeta`'s load failure, #5321).
+fn position_error_text(
+    message: std::fmt::Arguments,
+    location: &str,
+    line_no: usize,
+    line_text: &str,
+    column: usize,
+) -> String {
+    format!(
+        "jq: error: {message} at {location}, line {line_no}:\n{line_text}{}\n",
+        " ".repeat(column)
+    )
 }
 
 /// Print one [`ReportEntry`] the way jq prints it (#2703, #2956, #3573).
@@ -677,6 +694,142 @@ fn read_data_file(path: &Path) -> Result<OwnedValue, DataFileFailure> {
     let contents = std::fs::read_to_string(path).map_err(|e| unreadable(strerror_only(&e)))?;
     let values = parse_json_stream(&contents).map_err(|e| unreadable(format!("{e:#}")))?;
     Ok(OwnedValue::array_from(values))
+}
+
+/// What `modulemeta` answers for a module name (#5321), resolved against the library
+/// directories the way `import` resolves its module -- but without the current directory
+/// [`ModuleLoader::new`] puts first, which jq's `modulemeta` does not search (a `cw.jq` in
+/// the working directory is `module not found: cw`, captured live against jq 1.7.1).
+///
+/// The answer is the module header's metadata in source order, then `deps` (one object per
+/// `import`/`include` in source order: the directive's own metadata, then `as` for an
+/// import, `is_data` and `relpath`) and `defs` (`name/arity` of each top-level `def`). A
+/// module that fails to load is not an error of the filter: jq prints the diagnostic and
+/// answers `null`, with exit 0, so it comes back as stderr text.
+fn module_meta_outcome(lib_dirs: &[PathBuf], name: &str) -> jq::cli_context::ModuleMetaOutcome {
+    use jq::cli_context::ModuleMetaOutcome::{Error, LoadFailure, Meta};
+
+    if let Some(message) = invalid_module_path(name) {
+        return Error(message);
+    }
+    let Some(file) = resolve_module_in(lib_dirs, name) else {
+        return Error(format!("module not found: {name}"));
+    };
+    let canonical = canonical_or_self(&file);
+    let contents = match std::fs::read_to_string(&file) {
+        Ok(contents) => contents,
+        Err(e) => {
+            return LoadFailure(format!(
+                "jq: error loading data file {}: {}\n\n",
+                canonical.display(),
+                strerror_only(&e)
+            ));
+        }
+    };
+    let program = match jq::parse_program(&contents) {
+        Ok(program) => program,
+        Err(e) => {
+            let (line_no, line_text, column) = line_at_offset(&contents, e.position);
+            return LoadFailure(position_error_text(
+                format_args!("{}", e.message),
+                &canonical.display().to_string(),
+                line_no,
+                &line_text,
+                column,
+            ));
+        }
+    };
+
+    let mut defs = Vec::new();
+    let mut tail = &program.expr;
+    while let Expr::FuncDef {
+        name, params, then, ..
+    } = tail
+    {
+        defs.push(OwnedValue::string(format!("{name}/{}", params.len())));
+        tail = then;
+    }
+    if !matches!(tail, Expr::Identity) {
+        return LoadFailure(
+            "jq: error: jq: error: library should only have function definitions, not a main expression\n<unknown location>\n"
+                .to_string(),
+        );
+    }
+
+    let mut directives = Vec::new();
+    for import in &program.imports {
+        let mut entry = meta_object_pairs(import.metadata.as_deref());
+        set_pair(&mut entry, "as", OwnedValue::string(import.alias.clone()));
+        set_pair(&mut entry, "is_data", OwnedValue::Bool(import.data));
+        set_pair(
+            &mut entry,
+            "relpath",
+            OwnedValue::string(import.path.clone()),
+        );
+        directives.push((import.decl_index, entry));
+    }
+    for include in &program.includes {
+        let mut entry = meta_object_pairs(include.metadata.as_deref());
+        set_pair(&mut entry, "is_data", OwnedValue::Bool(false));
+        set_pair(
+            &mut entry,
+            "relpath",
+            OwnedValue::string(include.path.clone()),
+        );
+        directives.push((include.decl_index, entry));
+    }
+    directives.sort_by_key(|(index, _)| *index);
+
+    let mut meta = meta_object_pairs(program.module.as_ref().map(|m| m.metadata.as_slice()));
+    set_pair(
+        &mut meta,
+        "deps",
+        OwnedValue::Array(
+            directives
+                .into_iter()
+                .map(|(_, entry)| OwnedValue::object_from(entry))
+                .collect(),
+        ),
+    );
+    set_pair(&mut meta, "defs", OwnedValue::array_from(defs));
+    Meta(OwnedValue::object_from(meta))
+}
+
+/// A metadata object as `(key, value)` pairs in source order.
+fn meta_object_pairs(object: Option<&[(String, jq::MetaValue)]>) -> Vec<(String, OwnedValue)> {
+    object
+        .unwrap_or_default()
+        .iter()
+        .map(|(key, value)| (key.clone(), meta_value_to_owned(value)))
+        .collect()
+}
+
+fn meta_value_to_owned(value: &jq::MetaValue) -> OwnedValue {
+    match value {
+        jq::MetaValue::Null => OwnedValue::Null,
+        jq::MetaValue::Bool(b) => OwnedValue::Bool(*b),
+        jq::MetaValue::String(s) => OwnedValue::string(s.clone()),
+        jq::MetaValue::Number(n) => {
+            if n.fract() == 0.0 && n.abs() < 9_007_199_254_740_992.0 {
+                OwnedValue::Int(*n as i64)
+            } else {
+                OwnedValue::Float(*n)
+            }
+        }
+        jq::MetaValue::Array(items) => {
+            OwnedValue::Array(items.iter().map(meta_value_to_owned).collect())
+        }
+        jq::MetaValue::Object(pairs) => OwnedValue::object_from(meta_object_pairs(Some(pairs))),
+    }
+}
+
+/// Set `key` the way jq's object update does: replace the value in place if the key is
+/// there already, else append it.
+fn set_pair(pairs: &mut Vec<(String, OwnedValue)>, key: &str, value: OwnedValue) {
+    match pairs.iter_mut().find(|(seen, _)| seen == key) {
+        Some(pair) => pair.1 = value,
+        None => pairs.push((key.to_string(), value)),
+    }
 }
 
 /// Fold a list of `(name, value)` bindings so a repeated name keeps only its
@@ -1220,6 +1373,13 @@ impl ModuleLoader {
             deps_of: BTreeMap::new(),
             top_ids: Vec::new(),
         }
+    }
+
+    /// The library directories alone (`-L`, `JQ_LIBRARY_PATH`, `~/.jq`): the search path
+    /// without the current directory [`Self::new`] puts first (#5327). `modulemeta` searches
+    /// these and not the current directory (#5321).
+    fn lib_dirs(&self) -> &[PathBuf] {
+        &self.search_path[1..]
     }
 
     /// The run id for `module_path`, interned by canonical file so the same
@@ -4034,6 +4194,8 @@ pub fn run_jq(mut args: JqCommand) -> Result<i32> {
     // that names an undefined function, and one that includes a missing module
     // are all "jq could not compile this program".
     let mut module_loader = ModuleLoader::new(&args.library_path);
+    let module_lib_dirs = module_loader.lib_dirs().to_vec();
+    jq::cli_context::set_module_resolver(move |name| module_meta_outcome(&module_lib_dirs, name));
 
     // #2395: re-parse the filter once the module-sourced def names are known,
     // so a `def` arriving through `include` or `~/.jq` can shadow a builtin
