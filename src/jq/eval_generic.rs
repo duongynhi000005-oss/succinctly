@@ -6609,6 +6609,26 @@ pub enum GenericResult<V: DocumentValue> {
 }
 
 impl<V: DocumentValue> GenericResult<V> {
+    /// Whether this is an error, a `break` or a `halt`: a result that carries a failure and no
+    /// value (a `Partial` still has a prefix, and is not one).
+    pub fn is_failure(&self) -> bool {
+        match self {
+            Self::Error(_) | Self::Break(_) | Self::Halt(_) => true,
+            Self::One(_)
+            | Self::OneCursor(_)
+            | Self::Many(_)
+            | Self::ManyCursor(_)
+            | Self::LazyKeys { .. }
+            | Self::LazyIndexRange(_)
+            | Self::LazySeq(_)
+            | Self::LazyObject(_)
+            | Self::Owned(_)
+            | Self::ManyOwned(_)
+            | Self::Partial(_, _)
+            | Self::None => false,
+        }
+    }
+
     /// Whether streaming this result would write at least one value to
     /// output.
     ///

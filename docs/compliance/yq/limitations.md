@@ -1116,7 +1116,7 @@ Real yq v4.53.3 keeps both entries on every row below, run on `a: 1 / a: 2 / b: 
 |-------------------------------------|---------------|----------------------|
 | `-P '.'`                            | `a: 2 / b: 3` | `a: 1 / a: 2 / b: 3` |
 | `--eval-all '.'` (yq: `ea '.'`)     | `a: 2 / b: 3` | `a: 1 / a: 2 / b: 3` |
-| `'., .'`                            | `a: 2 / b: 3` | `a: 1 / a: 2 / b: 3` |
+| `-P '., .'`                         | `a: 2 / b: 3` | `a: 1 / a: 2 / b: 3` |
 | `'.b = 5'`, on stdout or under `-i` | `a: 2 / b: 5` | `a: 1 / a: 2 / b: 5` |
 | `-i 'del(.b)'`                      | `a: 2`        | `a: 1 / a: 2`        |
 
@@ -1125,6 +1125,12 @@ Real yq v4.53.3 keeps both entries on every row below, run on `a: 1 / a: 2 / b: 
 `-s` with a non-identity filter (`-s '.[0]'`) has none either, because yq's `-s` is `--split-exp`, but it takes the same route and collapses.
 The two write rows are the "every assignment" half of [#1344](https://github.com/rust-works/succinctly/issues/1344)'s (b) decision.
 `[...]` around a cursor result (`[.[0]]`, [#2063](https://github.com/rust-works/succinctly/issues/2063)) is a further member that stays collapsed on stdout.
+A top-level comma stopped being a member in [#5283](https://github.com/rust-works/succinctly/issues/5283).
+When every branch is navigation (`., .b`, `.a, .zz`, `(.a, .b), .l`), stdout streams the branches one at a time through the M2 writers, so a repeated key and a node's flow style survive as they do for each branch alone.
+A branch that errors during evaluation prints nothing for the others, and a document separator is written once, before the first branch that prints.
+A failure found while a later branch streams (an undecodable scalar in a document yq rejects whole) comes after the earlier branches were written, as it does for `.[]` (#1615).
+A branch that answers an alias prints `*a`, as `.[]` and yq do, where the DOM route's per-result soundness rule expanded it (`.x, .y` on `x: &a {p: 1} / y: {q: *a}`).
+`-C`, `-0`, `-i`, `-s`, `--eval-all`, `-P` and a branch that is not navigation (`.a // .b`, `.a, (.b | length)`) keep the DOM route and its collapse.
 All of them close together once `OwnedValue::Object` can hold a repeated key, or the route can carry a cursor.
 The wiring fault the issue's triage also named no longer reproduces: `-P 'map(.)'`, `-P 'sort'` and `-P 'reverse'` print `99999999999999999999` as yq does, where the triage saw `1e+20` (`the_dom_route_keeps_a_large_integers_spelling_through_a_lazy_seq_2186` pins it).
 
@@ -2924,7 +2930,7 @@ axis instead of the object-key one.
 
 **One exception, on the materializing routes only.** Every decode-failure key's display
 fallback is the fixed constant `""`, so a mapping with *two* decode-failure keys collides
-the instant a materializing route (`--arg`, `-P`, `.,.`) builds an `IndexMap<String, _>`
+the instant a materializing route (`--arg`, `-P`, `[.]`) builds an `IndexMap<String, _>`
 keyed by that string -- the two are never actually the same key (#1385's "never a
 duplicate" rule again), but a plain string-keyed map cannot hold both entries under `""`.
 Rather than resurrect the silent-overwrite bug this whole effort exists to close,
@@ -2964,6 +2970,12 @@ deliberately keeps the narrower decode-failure-only flag so it does not refuse w
 streams. This is an [ADR-0018](../../adrs/adr-0018.md) rule-4(b) divergence on the
 materializing routes only: yq keeps both keys there too, and `OwnedValue::Object` cannot until
 a duplicate-capable object exists ([#1344](https://github.com/rust-works/succinctly/issues/1344)).
+
+**A top-level comma of navigation reads such a document the way `.` does (#5283, answering #2645).**
+Real yq rejects the document for every filter, as it rejects a single undecodable key, so this is the same divergence as `.`, not a new one.
+The materializing routes raise because they must build a map; a comma of navigation builds none, so `.,.` and `.k, .` echo both entries under `""` where they used to raise.
+That is the jq-side rule (#2103) applied to the one yq shape that was inconsistent with it: a filter validates what it reads, and one that materializes validates what it materializes.
+Four rows moved from matching yq's refusal to echoing (`.,.`, `., .a`, `.b, .`, `.., .a` on `"\ud800": 1 / "\ud800": 2`); `[.]`, `. as $x | $x` and the other materializing filters still raise.
 
 **Residuals.** `with_entries(.)` and `to_entries | from_entries` still merge on stdout
 (`'': v2`, exit 0): `to_entries` has already turned both keys into the plain string `""`, so
