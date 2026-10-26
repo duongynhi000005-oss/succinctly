@@ -1154,7 +1154,17 @@ impl ModuleLoader {
         let mut search_path = Vec::new();
         let mut auto_loaded_defs = Vec::new();
 
-        // Add command-line -L paths first (highest priority)
+        // #5327: jq 1.7.1 prepends the current directory to the list of every
+        // `import`/`include` that carries no `search` metadata, ahead of the
+        // `-L` directories -- for the main program, for a module's own nested
+        // imports alike (a nested import is *not* resolved against the
+        // importing module's directory: with `k.jq` in both the current
+        // directory and next to the module, the current directory's wins).
+        // `get_search_list` reports the `-L` list alone, so this does
+        // not belong in the CLI facts it reads.
+        search_path.push(PathBuf::from("."));
+
+        // Add command-line -L paths next
         for path in library_paths {
             if path.is_dir() {
                 search_path.push(path.clone());
@@ -1333,8 +1343,9 @@ impl ModuleLoader {
     /// A nested `include` resolves against the global search path only, never
     /// the including module's own directory -- `sub/usedeep.jq` saying
     /// `include "deep"` reports `module not found: deep` even with `deep.jq`
-    /// sitting next to it. So reusing the search path verbatim is both the
-    /// simple implementation and the faithful one.
+    /// sitting next to it (unless `deep.jq` is in the *current* directory,
+    /// which is the first entry of that path, #5327). So reusing the search
+    /// path verbatim is both the simple implementation and the faithful one.
     fn load_and_bind_module(
         &mut self,
         module_path: &str,

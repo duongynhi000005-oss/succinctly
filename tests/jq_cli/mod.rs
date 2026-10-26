@@ -155,3 +155,4 @@ mod i5302;
 mod i5304;
 mod i5312;
 mod i5322;
+mod i5327;

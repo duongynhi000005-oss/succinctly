@@ -292,9 +292,10 @@ does not expand `~` itself, so a tilde only works when the shell expands it firs
 
 Search order, highest first:
 
-1. `-L` / `--library-path` command-line paths
-2. `JQ_LIBRARY_PATH` entries, in the order listed
-3. `~/.jq`, when it is a directory
+1. The current directory, for an `import`/`include` of the main program and of a module alike (#5327)
+2. `-L` / `--library-path` command-line paths
+3. `JQ_LIBRARY_PATH` entries, in the order listed
+4. `~/.jq`, when it is a directory
 
 ```bash
 JQ_LIBRARY_PATH="$HOME/lib/jq:/usr/share/jq" succinctly jq 'import "utils" as u; u::helper' input.json
