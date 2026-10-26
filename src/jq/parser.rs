@@ -8599,10 +8599,53 @@ impl<'a> Parser<'a> {
         matched
     }
 
-    /// Parse assignment expressions: `path = value`, `path |= filter`, `path += value`, etc.
-    /// Assignment has higher precedence than pipe, lower than alternative.
+    /// The level between `,` and the assignment operators, which the two reference tools rank
+    /// the opposite way round (ADR-0018 rule 2: mode decides, #5293).
+    ///
+    /// **jq** declares `%right "//"` before `%nonassoc '=' SETPIPE ...` in `parser.y`, so `//` is
+    /// the *looser* of the two: `.b = .a // "d"` is `(.b = .a) // "d"`, and an assignment's two
+    /// sides stop before a `//`. **yq** gives `//` precedence 42 and `=` 40
+    /// (`pkg/yqlib/operation.go`, v4.53.3), so there `//` is tighter and `.b = .a // "d"` is
+    /// `.b = (.a // "d")`.
     fn parse_assignment(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_alternative()?;
+        if self.mode != ParserMode::Jq {
+            return self.parse_assignment_level();
+        }
+        let mut left = self.parse_assignment_level()?;
+        // Each iteration wraps `left` in another node, so this chain's own
+        // length is AST depth even though the loop never recurses (#1156).
+        let mut chain_depth = 0usize;
+        loop {
+            self.skip_ws();
+            // `//` but not `//=` (alternative assignment), which the assignment level took.
+            if self.peek_str(2) != "//" || self.peek_str(3) == "//=" {
+                break;
+            }
+            self.next();
+            self.next();
+            self.skip_ws();
+            let right = self.parse_assignment_level()?;
+            chain_depth += 1;
+            self.check_expr_nesting(chain_depth)?;
+            left = Expr::Alternative(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    /// An operand of an assignment operator, or its left side: in jq mode everything tighter than
+    /// `//`, which ends it ([`Self::parse_assignment`]); in yq mode an alternative-level expression.
+    fn parse_assignment_operand(&mut self) -> Result<Expr, ParseError> {
+        if self.mode == ParserMode::Jq {
+            self.parse_or()
+        } else {
+            self.parse_alternative()
+        }
+    }
+
+    /// Parse assignment expressions: `path = value`, `path |= filter`, `path += value`, etc.
+    /// Assignment has higher precedence than pipe; against `//` see [`Self::parse_assignment`].
+    fn parse_assignment_level(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_assignment_operand()?;
         self.skip_ws();
 
         // yq metadata-assignment grammar (#798) -- must be tried before the
@@ -8638,7 +8681,7 @@ impl<'a> Parser<'a> {
             self.next(); // |
             self.next(); // =
             self.skip_ws();
-            let filter = self.parse_alternative()?;
+            let filter = self.parse_assignment_operand()?;
             return Ok(Expr::Update {
                 path: Box::new(left),
                 filter: Box::new(filter),
@@ -8651,7 +8694,7 @@ impl<'a> Parser<'a> {
             self.next(); // /
             self.next(); // =
             self.skip_ws();
-            let value = self.parse_alternative()?;
+            let value = self.parse_assignment_operand()?;
             return Ok(Expr::AlternativeAssign {
                 path: Box::new(left),
                 value: Box::new(value),
@@ -8671,7 +8714,7 @@ impl<'a> Parser<'a> {
                 MergeFlags::default()
             };
             self.skip_ws();
-            let value = self.parse_alternative()?;
+            let value = self.parse_assignment_operand()?;
             return Ok(Expr::CompoundAssign {
                 op: AssignOp::Mul(flags),
                 path: Box::new(left),
@@ -8694,7 +8737,7 @@ impl<'a> Parser<'a> {
                 self.next(); // op char
                 self.next(); // =
                 self.skip_ws();
-                let value = self.parse_alternative()?;
+                let value = self.parse_assignment_operand()?;
                 return Ok(Expr::CompoundAssign {
                     op,
                     path: Box::new(left),
@@ -8708,7 +8751,7 @@ impl<'a> Parser<'a> {
         if self.peek() == Some('=') && self.peek_str(2) != "==" {
             self.next(); // =
             self.skip_ws();
-            let value = self.parse_alternative()?;
+            let value = self.parse_assignment_operand()?;
             return Ok(Expr::Assign {
                 path: Box::new(left),
                 value: Box::new(value),
@@ -11445,6 +11488,66 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// #5293: jq ranks `//` *looser* than the assignment operators (`%right "//"` before
+    /// `%nonassoc '=' ...` in `parser.y`) and yq ranks it tighter (42 against 40), so the same
+    /// text is two trees.
+    #[test]
+    fn alternative_against_assignment_follows_the_mode_5293() {
+        for (source, op_is_assign) in [
+            (".b = .a // 1", true),
+            (".b |= .a // 1", false),
+            (".b += .a // 1", false),
+            (".b //= .a // 1", false),
+        ] {
+            let jq = parse_with_mode(source, ParserMode::Jq).unwrap();
+            let Expr::Alternative(left, right) = &jq else {
+                panic!("jq: `{source}` is not `(assignment) // 1`: {jq:?}");
+            };
+            assert!(
+                matches!(
+                    left.as_ref(),
+                    Expr::Assign { .. }
+                        | Expr::Update { .. }
+                        | Expr::CompoundAssign { .. }
+                        | Expr::AlternativeAssign { .. }
+                ),
+                "jq: `{source}`: {left:?}"
+            );
+            assert!(matches!(right.as_ref(), Expr::Literal(_)), "{right:?}");
+            assert_eq!(matches!(left.as_ref(), Expr::Assign { .. }), op_is_assign);
+
+            let yq = parse_with_mode(source, ParserMode::Yq).unwrap();
+            let value = match &yq {
+                Expr::Assign { value, .. }
+                | Expr::CompoundAssign { value, .. }
+                | Expr::AlternativeAssign { value, .. } => value,
+                Expr::Update { filter, .. } => filter,
+                other => panic!("yq: `{source}` is not an assignment: {other:?}"),
+            };
+            assert!(
+                matches!(value.as_ref(), Expr::Alternative(..)),
+                "yq: `{source}`: {value:?}"
+            );
+        }
+        // The left side of an assignment stops before a `//` too, and a chain of `//` stays one.
+        let jq = parse_with_mode(".a // .b = 1", ParserMode::Jq).unwrap();
+        assert!(
+            matches!(&jq, Expr::Alternative(_, right) if matches!(right.as_ref(), Expr::Assign { .. })),
+            "{jq:?}"
+        );
+        let jq = parse_with_mode(".a = 1 // 2 // 3", ParserMode::Jq).unwrap();
+        assert!(
+            matches!(&jq, Expr::Alternative(left, _) if matches!(left.as_ref(), Expr::Alternative(..))),
+            "{jq:?}"
+        );
+        // `//=` is an assignment operator, not a `//`.
+        let jq = parse_with_mode(".a //= 1 // 2", ParserMode::Jq).unwrap();
+        assert!(
+            matches!(&jq, Expr::Alternative(left, _) if matches!(left.as_ref(), Expr::AlternativeAssign { .. })),
+            "{jq:?}"
+        );
     }
 
     #[test]
