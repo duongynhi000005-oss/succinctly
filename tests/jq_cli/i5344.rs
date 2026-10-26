@@ -75,6 +75,11 @@ fn test_module_metadata_folds_constant_expressions_5344() -> Result<()> {
             "module {a:true, b:false, c:null};",
             r#"{"a":true,"b":false,"c":null,"#,
         ),
+        // A `-` that subtracts, or sits in a string or a comment, is not a unary minus.
+        ("module {a:(5-3)};", r#"{"a":2,"#),
+        ("module {a:(5 - 3)};", r#"{"a":2,"#),
+        (r#"module {"a-b":"-1"};"#, r#"{"a-b":"-1","#),
+        ("module {a:1 # -1\n};", r#"{"a":1,"#),
     ] {
         let (stdout, stderr, code) = modulemeta(header)?;
         assert!(
@@ -174,6 +179,7 @@ fn test_directive_metadata_is_a_constant_expression_too_5344() -> Result<()> {
 /// The folded metadata is what the loader reads: a `search` computed by the fold finds its
 /// directory (#5338), and the program's own directive takes the same expressions.
 #[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object literals read like format arguments
 fn test_program_directive_metadata_folds_for_the_loader_5344() -> Result<()> {
     let dir = tempfile::tempdir()?;
     for sub in ["L1", "L2"] {

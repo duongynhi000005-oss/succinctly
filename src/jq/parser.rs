@@ -651,7 +651,7 @@ fn has_unary_minus(text: &str) -> bool {
             }
             c if c.is_whitespace() => {}
             '-' => {
-                if previous.is_none_or(|p| "([{,:;|=!<>+-*/%".contains(p)) {
+                if previous.map_or(true, |p| "([{,:;|=!<>+-*/%".contains(p)) {
                     return true;
                 }
                 previous = Some('-');
