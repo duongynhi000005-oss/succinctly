@@ -400,16 +400,16 @@ and the yq-mode captures in `test_owned_identity_rules_match_yq_2416` (`tests/yq
 
 Loosest first, matching jq's `parser.y`:
 
-| Level | Operators                             | Notes                                              |
-|-------|---------------------------------------|----------------------------------------------------|
-| 1     | `\|`                                  | Loosest. Each stage is a comma list.               |
-| 2     | `,`                                   | Binds tighter than `\|`: `a,b \| f` is `(a,b) \| f`. |
-| 3     | `as`                                  | Binds the `Term` before it; body runs to the end.  |
-| 4     | `//`                                  | Looser than assignment in jq mode (#5293).         |
-| 5     | `=` `\|=` `+=` `-=` `*=` `/=` `%=` `//=` | Nonassociative. See "`//` against assignment" below. |
-| 6     | `or`, `and`                           |                                                    |
-| 7     | `==` `!=` `<` `<=` `>` `>=`           |                                                    |
-| 8     | `+` `-`, then `*` `/` `%`             | Tightest.                                          |
+| Level | Operators                                | Notes                                                |
+|-------|------------------------------------------|------------------------------------------------------|
+| 1     | `\|`                                     | Loosest. Each stage is a comma list.                 |
+| 2     | `,`                                      | Binds tighter than `\|`: `a,b \| f` is `(a,b) \| f`. |
+| 3     | `as`                                     | Binds the `Term` before it; body runs to the end.    |
+| 4     | `//`                                     | Looser than assignment in jq mode (#5293).           |
+| 5     | `=` `\|=` `+=` `-=` `*=` `/=` `%=` `//=` | Nonassociative. Tighter than `//` in jq mode.        |
+| 6     | `or`, `and`                              |                                                      |
+| 7     | `==` `!=` `<` `<=` `>` `>=`              |                                                      |
+| 8     | `+` `-`, then `*` `/` `%`                | Tightest.                                            |
 
 `1,2,3 | . * 2` is therefore `(1,2,3) | . * 2` → `2 4 6`, and
 `1,2 as $x | $x | .+10` is `1, (2 as $x | $x | .+10)` → `1 12` (#462).

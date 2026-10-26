@@ -8499,7 +8499,18 @@ impl<'a> Parser<'a> {
 
     /// Parse alternative expressions: `expr // expr`
     fn parse_alternative(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_or()?;
+        let left = self.parse_or()?;
+        self.parse_alternative_chain(left, Self::parse_or)
+    }
+
+    /// The `// operand` links after `left`, each operand parsed by `operand` (the level one
+    /// binds tighter than `//`: [`Self::parse_or`] in yq's order, the assignment level in jq's,
+    /// [`Self::parse_assignment`]). `//=` is not a link: it is an assignment operator.
+    fn parse_alternative_chain(
+        &mut self,
+        mut left: Expr,
+        operand: fn(&mut Self) -> Result<Expr, ParseError>,
+    ) -> Result<Expr, ParseError> {
         // Each iteration wraps `left` in another node, so this chain's own
         // length is AST depth even though the loop never recurses (#1156).
         let mut chain_depth = 0usize;
@@ -8507,17 +8518,13 @@ impl<'a> Parser<'a> {
         loop {
             self.skip_ws();
             // Check for // but not //= (alternative assignment)
-            let peek3 = self.peek_str(3);
-            if peek3 == "//=" {
-                break;
-            }
-            if self.peek_str(2) != "//" {
+            if self.peek_str(3) == "//=" || self.peek_str(2) != "//" {
                 break;
             }
             self.next();
             self.next();
             self.skip_ws();
-            let right = self.parse_or()?;
+            let right = operand(self)?;
             chain_depth += 1;
             self.check_expr_nesting(chain_depth)?;
             left = Expr::Alternative(Box::new(left), Box::new(right));
@@ -8611,25 +8618,8 @@ impl<'a> Parser<'a> {
         if self.mode != ParserMode::Jq {
             return self.parse_assignment_level();
         }
-        let mut left = self.parse_assignment_level()?;
-        // Each iteration wraps `left` in another node, so this chain's own
-        // length is AST depth even though the loop never recurses (#1156).
-        let mut chain_depth = 0usize;
-        loop {
-            self.skip_ws();
-            // `//` but not `//=` (alternative assignment), which the assignment level took.
-            if self.peek_str(2) != "//" || self.peek_str(3) == "//=" {
-                break;
-            }
-            self.next();
-            self.next();
-            self.skip_ws();
-            let right = self.parse_assignment_level()?;
-            chain_depth += 1;
-            self.check_expr_nesting(chain_depth)?;
-            left = Expr::Alternative(Box::new(left), Box::new(right));
-        }
-        Ok(left)
+        let left = self.parse_assignment_level()?;
+        self.parse_alternative_chain(left, Self::parse_assignment_level)
     }
 
     /// An operand of an assignment operator, or its left side: in jq mode everything tighter than
