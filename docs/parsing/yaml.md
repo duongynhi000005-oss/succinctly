@@ -5619,7 +5619,7 @@ zero-target answers, which these static paths with a literal right side do not e
 
 ## O12: The Owned `tostring`/`@format` Bypass for a Key Node — Accepted ✅
 
-**Issue**: #2789 (the first of its two costs; the second is still open).
+**Issue**: #2789 (the first of its two costs; the second is O14).
 
 ### What was slow
 
@@ -5640,8 +5640,7 @@ scalar's *text*, not its type, so a value spelled like a null, bool or number ke
 rest, and any value `as_str` rejects, runs exactly as before.
 
 The second cost, the sibling hop and decode per emitted node (`[.[] | key] | length` +23-30%), is
-not touched: it needs the key cursor recorded during navigation, which widens `PathContextPos` and
-`path_step_generic`'s shared signature.
+not touched here; see O14.
 
 ### Measured (interleaved A/B, min of 9, `yq -o json`, flat `kN: N` mappings, output identical on 18 of 18 rows per machine)
 
@@ -5712,6 +5711,83 @@ flag is rare and its output is dominated by the escaping it exists for. The rele
 ### Files Modified
 
 - `src/bin/succinctly/yq_runner.rs` — `json_ascii!`, `AsciiSink`
+
+---
+
+## O14: Handing `.[] | key` the Key Node the Iteration Holds — Accepted ✅
+
+**Issue**: #2789 (the second of its two costs).
+
+### What was slow
+
+`key` emits the member's key *node* (#2763). `path_context_emitting_value` found it from the value's
+cursor: a `prev_sibling` hop, a `value()` decode of the key, and the `as_str` spelling check. For
+`[.[] | key]` that is a second visit to a node the iteration had just decoded to name the path
+component, `+23-30%` against the merge-base.
+
+### What was tried first, and rejected
+
+The issue's sketch, record the key cursor and its decoded value in the navigation step, has two homes
+and both cost more than they save:
+
+- **On the trail link** (`PathContextStep`): the link went from 120 to 208 bytes, and every position of
+  every walk pays for it. `[.. | path]` over a 20 MB `users` document read +30.5% (7950X) and +21% peak
+  RSS, +2.7% on an M4 Pro. The key shapes gained 7-11%.
+- **On the position** (`PathContextPos`): `Vec<PathContextPos>` buffers widen by the same 88 bytes.
+  `[.. | path]` +14.2% (7950X), +18% peak RSS (M4 Pro: 575 -> 678 MB).
+
+### The change
+
+`path_iterate_step_generic` offers its `emit` callback the member's key cursor and decoded value
+(`MemberKey`) beside the child it reaches, which costs nothing: the iteration holds both. Only one
+consumer wants them, the walk of exactly `.[] | key`: `path_context_walk_pipe` takes that two-stage shape
+to `path_context_iterate_key`, which feeds each child's `key` emission the pair it was handed
+(`path_context_emitting_value`'s new `member_key` argument) and so skips the hop and the second decode.
+Nothing is stored: no trail link and no `PathContextPos` grows. Every other walk, and every other
+shape of `key` (a `.a | key`, a `.. | key`, a `select` between the two), takes the hop as before, so the
+fusion is a *structural* fast path on a shape the query spells, not a predicate over what the rest of
+the pipe does with the node. The check `key_node_spells` is still made, because it is what keeps an
+undecodable or explicitly tagged key on the owned path.
+
+### Measured (interleaved A/B, min of 11, `yq -o json`, flat `kN: N` mappings, output identical on every row)
+
+Before is `0b5ddcb95`, after is the change on top of it; `--release --features cli`, 1,600,000 keys
+(26.6 MB). The 100,000 and 400,000-key rows move the same way (M4 Pro -14.6% / -14.8% on
+`[.[] | key]`, 7950X -7.4% / -8.1%).
+
+| row (delta of min)                                  | M4 Pro | 7950X  |
+|-----------------------------------------------------|--------|--------|
+| `[.[] \| key] \| length`                            | -14.2% | -7.4%  |
+| `[.[] \| key \| tostring] \| length`                | -14.4% | -6.5%  |
+| `[.[] \| key \| line] \| length`                    | -14.5% | -10.9% |
+| `[.[] \| key \| head_comment] \| length`            | -10.1% | -7.9%  |
+| `keys_unsorted \| length` (control)                 | +1.9%  | +0.7%  |
+| `[.[] \| path] \| length` (control)                 | +2.7%  | +1.3%  |
+| `[.[] \| select(. > 5) \| key] \| length` (control) | +0.4%  | -0.2%  |
+| `.` (control)                                       | -0.0%  | +0.8%  |
+| `[.. \| path] \| length`, 20 MB `users` (control)   | +0.5%  | +0.5%  |
+| `[.. \| path] \| length`, 20 MB `nested` (control)  | +1.6%  | +0.8%  |
+
+Peak RSS of `[.. | path]` on `users` (M4 Pro): 575.26 MB before, 575.32 MB after. `keys_unsorted` does
+not run this code at all, so its +1.9% is the noise floor of that box.
+
+The residual to the "node never emitted" bound (-22% on `[.[] | key]`, an attribution build with the emission
+disabled) is the node itself, which is the feature #2763 added.
+
+### Tests
+
+`tests/yq_cli/i2789.rs`: `[.[] | key]` and the metadata getters after it (`line`, `column`, `head_comment`,
+`line_comment`, `style`, `tag`, `anchor`, `path`, `parent`) over plain, duplicate-key, merge-key, typed, tagged,
+quoted, anchored, multi-line, sequence and flow documents, each a live yq v4.53.3 capture and kept only where
+the pre-change binary already matched it (16 of 184 rows differ from yq on both sides: a tagged or non-scalar key is
+not a node here, and an array index is not a string in `path`, none of it this issue's). The unit test
+`iterate_then_key_walk_matches_the_two_stage_walk_2789` pins that the fused walk emits what the two-stage walk
+does, node for node, and `path_context_emitting_value` asserts in debug builds that a handed-over key is the
+value's previous sibling.
+
+### Files Modified
+
+- `src/jq/eval_generic.rs` — `MemberKey`, `path_iterate_step_generic`/`path_step_each_generic` (`emit` takes it), `path_context_emitting_value`, `path_context_iterate_key`, `path_context_walk_pipe`
 
 ---
 
