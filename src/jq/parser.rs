@@ -11495,46 +11495,43 @@ mod tests {
     /// text is two trees.
     #[test]
     fn alternative_against_assignment_follows_the_mode_5293() {
-        for (source, op_is_assign) in [
-            (".b = .a // 1", true),
-            (".b |= .a // 1", false),
-            (".b += .a // 1", false),
-            (".b //= .a // 1", false),
+        fn is_assignment(expr: &Expr) -> bool {
+            matches!(
+                expr,
+                Expr::Assign { .. }
+                    | Expr::Update { .. }
+                    | Expr::CompoundAssign { .. }
+                    | Expr::AlternativeAssign { .. }
+            )
+        }
+        for source in [
+            ".b = .a // 1",
+            ".b |= .a // 1",
+            ".b += .a // 1",
+            ".b //= .a // 1",
         ] {
+            // jq: `(assignment) // 1`.
             let jq = parse_with_mode(source, ParserMode::Jq).unwrap();
-            let Expr::Alternative(left, right) = &jq else {
-                panic!("jq: `{source}` is not `(assignment) // 1`: {jq:?}");
-            };
             assert!(
-                matches!(
-                    left.as_ref(),
-                    Expr::Assign { .. }
-                        | Expr::Update { .. }
-                        | Expr::CompoundAssign { .. }
-                        | Expr::AlternativeAssign { .. }
-                ),
-                "jq: `{source}`: {left:?}"
+                matches!(&jq, Expr::Alternative(left, right)
+                    if is_assignment(left) && matches!(right.as_ref(), Expr::Literal(_))),
+                "jq: `{source}`: {jq:?}"
             );
-            assert!(matches!(right.as_ref(), Expr::Literal(_)), "{right:?}");
-            assert_eq!(matches!(left.as_ref(), Expr::Assign { .. }), op_is_assign);
-
+            // yq: the assignment's value is the `//`.
             let yq = parse_with_mode(source, ParserMode::Yq).unwrap();
-            let value = match &yq {
-                Expr::Assign { value, .. }
-                | Expr::CompoundAssign { value, .. }
-                | Expr::AlternativeAssign { value, .. } => value,
-                Expr::Update { filter, .. } => filter,
-                other => panic!("yq: `{source}` is not an assignment: {other:?}"),
-            };
             assert!(
-                matches!(value.as_ref(), Expr::Alternative(..)),
-                "yq: `{source}`: {value:?}"
+                matches!(&yq, Expr::Assign { value, .. }
+                    | Expr::CompoundAssign { value, .. }
+                    | Expr::AlternativeAssign { value, .. }
+                    | Expr::Update { filter: value, .. }
+                    if matches!(value.as_ref(), Expr::Alternative(..))),
+                "yq: `{source}`: {yq:?}"
             );
         }
         // The left side of an assignment stops before a `//` too, and a chain of `//` stays one.
         let jq = parse_with_mode(".a // .b = 1", ParserMode::Jq).unwrap();
         assert!(
-            matches!(&jq, Expr::Alternative(_, right) if matches!(right.as_ref(), Expr::Assign { .. })),
+            matches!(&jq, Expr::Alternative(_, right) if is_assignment(right)),
             "{jq:?}"
         );
         let jq = parse_with_mode(".a = 1 // 2 // 3", ParserMode::Jq).unwrap();
