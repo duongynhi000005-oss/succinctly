@@ -64,8 +64,6 @@ fn test_nth_and_delpaths_in_path_and_try_positions_5309() -> Result<()> {
             "\"string (\\\"a\\\") and number (1) cannot be added\"\n",
             0,
         ),
-        ("[path(null|nth(1;.))]", "[]\n", 0),
-        ("[path(nth(null;1))]", "", 5),
         (
             "null | try delpaths([[0],{}]) catch .",
             "\"Path must be specified as array, not object\"\n",
@@ -77,6 +75,22 @@ fn test_nth_and_delpaths_in_path_and_try_positions_5309() -> Result<()> {
             "[\"Path must be specified as array, not null\",\"Path must be specified as array, not null\",\"Path must be specified as array, not boolean\"]\n",
             0,
         ),
+    ] {
+        let (out, err, code) = run(filter)?;
+        assert_eq!((out.as_str(), code), (want, want_code), "{filter}: {err}");
+    }
+    Ok(())
+}
+
+/// `nth` in a path position follows the same index rules; the holdout build refuses a path
+/// expression that does more than navigate, so it cannot run these programs.
+#[test]
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
+fn test_nth_in_a_path_position_5309() -> Result<()> {
+    for (filter, want, want_code) in [
+        ("[path(null|nth(1;.))]", "[]\n", 0),
+        // A negative-branch index (`null` sorts below every number) raises, even in a path.
+        ("[path(nth(null;1))]", "", 5),
     ] {
         let (out, err, code) = run(filter)?;
         assert_eq!((out.as_str(), code), (want, want_code), "{filter}: {err}");
