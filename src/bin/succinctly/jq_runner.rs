@@ -644,11 +644,12 @@ impl<'a> Target<'a> {
 /// entries and skips the rest; any other value (a number, `null`, an object) is an empty list
 /// and finds nothing. Each entry is `~/...` under `$HOME`, `$ORIGIN/...` under jq's own
 /// directory (`jq_origin`), a path that starts with `/` as it stands, and anything else
-/// (including the empty string, but not exactly `.`, which is the working directory) relative to `origin`: the directory of the file that
-/// holds the directive, or for the main program the working directory (the `-f` file's
-/// directory under `-f`). Captured live against jq 1.7.1, including that a relative entry in
-/// a *module's* directive resolves against that module's directory and not the working one.
-/// A `module {search: ...};` header is not read.
+/// (including the empty string, but not exactly `.`, which is the working directory)
+/// relative to `origin`: the directory of the file that holds the directive, or for the main
+/// program the working directory (the `-f` file's directory under `-f`). Captured live
+/// against jq 1.7.1, including that a relative entry in a *module's* directive (or in
+/// `~/.jq`) resolves against that file's directory and not the working one. A
+/// `module {search: ...};` header is not read.
 fn directive_search(
     metadata: Option<&MetaObject>,
     origin: &Path,
@@ -677,34 +678,24 @@ fn directive_search(
 /// One `search` entry as a directory; see [`directive_search`].
 fn expand_search_entry(entry: &str, origin: &Path, jq_origin: &Path) -> Option<PathBuf> {
     let home = std::env::var_os("HOME");
-    expand_search_entry_with(
-        entry,
-        home.as_ref().map(|home| home.to_string_lossy()).as_deref(),
-        origin,
-        jq_origin,
-    )
+    expand_search_entry_with(entry, home.as_deref().map(Path::new), origin, jq_origin)
 }
 
 /// [`expand_search_entry`] with `$HOME` given, so it can be tested without touching the
 /// environment.
 fn expand_search_entry_with(
     entry: &str,
-    home: Option<&str>,
+    home: Option<&Path>,
     origin: &Path,
     jq_origin: &Path,
 ) -> Option<PathBuf> {
-    let home_relative;
-    let entry = match entry.strip_prefix("~/") {
-        Some(rest) => {
-            // jq refuses a `~/` it cannot expand; here the entry finds nothing.
-            home_relative = format!("{}/{rest}", home?);
-            home_relative.as_str()
-        }
-        None => entry,
-    };
+    if let Some(rest) = entry.strip_prefix("~/") {
+        // jq refuses a `~/` it cannot expand; here the entry finds nothing.
+        return Some(home?.join(rest));
+    }
     if let Some(rest) = entry.strip_prefix("$ORIGIN/") {
         Some(jq_origin.join(rest))
-    } else if entry.starts_with('/') {
+    } else if Path::new(entry).is_absolute() {
         Some(PathBuf::from(entry))
     } else if entry == "." {
         // Exactly `.` is the working directory, whatever file holds the directive.
@@ -1774,7 +1765,9 @@ impl ModuleLoader {
     ///
     /// jq treats `~/.jq` as an `include` declared ahead of everything in the program, so
     /// its dependencies resolve on the default search list (the current directory, then
-    /// `-L`) and stay its own: like a module's, they are not visible to the main filter.
+    /// `-L`) unless one carries `search` metadata, whose relative entries are relative to
+    /// the `~/.jq` file's directory (#5338), and stay its own: like a module's, they are
+    /// not visible to the main filter.
     /// Run id [`AUTO_LOAD_RUN_ID`] is its own run, which is where those dependencies are
     /// linked from (see [`Self::walk_modules`]).
     fn bind_dot_jq(&mut self) -> Result<(), ModuleLoadError> {
@@ -11732,7 +11725,9 @@ mod tests {
     /// #5338: `~/` is `$HOME`, and finds nothing where there is none.
     #[test]
     fn home_relative_search_entry_needs_home_5338() {
-        let expand = |home| expand_search_entry_with("~/lib", home, Path::new("."), Path::new("."));
+        let expand = |home: Option<&str>| {
+            expand_search_entry_with("~/lib", home.map(Path::new), Path::new("."), Path::new("."))
+        };
         assert_eq!(expand(Some("/h")), Some(PathBuf::from("/h/lib")));
         assert_eq!(expand(None), None);
         // Only a leading `~/` is special.

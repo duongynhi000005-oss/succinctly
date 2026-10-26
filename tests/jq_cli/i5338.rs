@@ -220,6 +220,34 @@ fn test_search_in_a_module_is_relative_to_the_module_5338() -> Result<()> {
     Ok(())
 }
 
+/// A `~/.jq` file's directives take `search` too, relative to the file's own directory.
+#[test]
+fn test_search_in_dot_jq_is_relative_to_the_file_5338() -> Result<()> {
+    let dir = fixture()?;
+    let home = tempfile::tempdir()?;
+    std::fs::create_dir(home.path().join("lib"))?;
+    std::fs::write(home.path().join("lib/m.jq"), "def a: \"home-lib\";")?;
+    std::fs::write(
+        home.path().join(".jq"),
+        "import \"m\" as hm {search:\"./lib\"}; def hb: hm::a;",
+    )?;
+    let (output, code) = crate::spawn_with_signal_retry(
+        || {
+            let mut command = std::process::Command::new(crate::succinctly_bin());
+            command
+                .current_dir(dir.path())
+                .env("HOME", home.path())
+                .args(["jq", "-nc", "hb"]);
+            command
+        },
+        None,
+    )?;
+    // The working directory has its own `m.jq`, which `search` replaces.
+    let stdout = String::from_utf8(output.stdout)?;
+    assert_eq!((stdout.as_str(), code), ("\"home-lib\"\n", 0));
+    Ok(())
+}
+
 #[test]
 fn test_search_in_a_program_file_is_relative_to_the_file_5338() -> Result<()> {
     let dir = fixture()?;
