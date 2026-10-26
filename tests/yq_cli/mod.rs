@@ -91,4 +91,5 @@ mod i5245;
 mod i5248;
 mod i5249;
 mod i5261;
+mod i5278;
 mod i865;

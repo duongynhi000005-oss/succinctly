@@ -4796,9 +4796,11 @@ A stage after the absent key that does not read its context still runs against t
 It is the rule an assignment's right side and an `and`/`or`/arithmetic operand already follow (#2588, above): a source that bound nothing is re-run once as `yq_empty_context_reemit` rewrites it, inside the scope that emptied it.
 The root cause the issue named was wrong: yq does not run the later stage on a `null` node it creates, it runs it on zero nodes, which is why `length`, `tostring` and `+` bind nothing while `error` and a literal still run.
 A comma source where one branch comes up empty and another does not (`(.a, (.zz | error("x"))) as $x | [$x]`, `((.zz | "a"), "b") as $x | [$x]`) still sees only the branch that produced output, since the rewrite applies only to a source that bound nothing.
+That holds on the path and write routes too: `del(((.zz | "a"), "b") as $k | .[$k])` deletes `.a` in yq and nothing here.
 The general form of that gap is a pipe whose left side is empty, outside any `as`: `select(false) | error("x")` raises in yq and is no output here.
-The retry replays the stages from the first context-free one on, so a stage there with an effect (`debug`, `stderr`) runs again when the first pass had already reached it and still bound nothing.
-An `as` that sits in a path position or the left side of a write (`del((.zz | error("x")) as $x | .a)`, which raises in yq) goes through `resolve_bind_source`, the path-register route, and gets no retry.
+The retry replays the stages from the first context-free one on, so a stage there with an effect (`debug`, `stderr`) runs again when the first pass had already reached it and still bound nothing, on the path and write routes as on the value routes.
+An `as` that sits in a path position or the left side of a write retries the same way (#5278): `del((.zz | error("x")) as $x | .a)` raises, and `del((.zz | "a") as $k | .[$k])` deletes `.a`, as in yq.
+A constant bound there and then read as a path (`del((.zz | "s") as $x | $x)`) refuses with `Invalid path expression`, where yq leaves the document alone, exactly as the non-empty spelling `del("s" as $x | $x)` does; the retry moved the first from a coincidental match into that existing divergence.
 A rewritten source that reads its position (`.zz | [.] | key`) is not run on the owned-identity route, since the node it constructs has no position of its own there; the body runs unbound, as yq answers.
 
 **An anchor's flow style read through an alias binding.** Captured on
