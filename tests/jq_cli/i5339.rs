@@ -106,6 +106,28 @@ fn test_dot_jq_directives_resolve_for_its_own_defs_5339() -> Result<()> {
     Ok(())
 }
 
+/// jq 1.7.1 does not look for a `~/.jq` file's modules next to it: a module that lives only in
+/// `$HOME` is `module not found` until `-L` names that directory.
+#[test]
+fn test_dot_jq_modules_are_not_searched_next_to_the_file_5339() -> Result<()> {
+    let (dir, home) = fixture()?;
+    std::fs::write(home.path().join("helpers.jq"), "def helper: \"home\";")?;
+    let dot_jq = "include \"helpers\"; def hb: helper;";
+    let (stdout, stderr, code) = run(&dir, &home, dot_jq, &["hb"])?;
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        (
+            "",
+            "jq: error: module not found: helpers\n\njq: 1 compile error\n",
+            3
+        )
+    );
+    let home_dir = home.path().to_str().expect("a temp dir path is UTF-8");
+    let (stdout, stderr, code) = run(&dir, &home, dot_jq, &["-L", home_dir, "hb"])?;
+    assert_eq!((stdout.as_str(), code), ("\"home\"\n", 0), "{stderr}");
+    Ok(())
+}
+
 #[test]
 fn test_dot_jq_dependencies_stay_private_to_the_file_5339() -> Result<()> {
     let (dir, home) = fixture()?;

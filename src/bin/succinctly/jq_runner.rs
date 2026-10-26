@@ -211,8 +211,9 @@ pub struct ModuleLoader {
     /// [`Self::bind_dot_jq`] to resolve those directives (#5339). `None` for a `~/.jq`
     /// without any, whose defs are already in [`Self::auto_loaded_defs`], and once bound.
     dot_jq: Option<DotJq>,
-    /// The `~/.jq` file's path whenever it was read and parsed, bound or not, so
-    /// [`Self::failure_report`] can walk its directives last, where jq does (#5339).
+    /// The path of a `~/.jq` that carries directives, bound or not, so
+    /// [`Self::failure_report`] can walk them last, where jq does (#5339). `None` for one
+    /// without any: there is nothing of it to walk.
     dot_jq_path: Option<PathBuf>,
     /// The modules whose own dependencies are currently being loaded, as
     /// `(resolved canonical file, module path as written)`, outermost first
@@ -1371,13 +1372,13 @@ impl ModuleLoader {
                             AUTO_LOAD_RUN_ID,
                             canonical_or_self(&jq_path).to_string_lossy().into_owned(),
                         );
-                        dot_jq_path = Some(jq_path.clone());
                         if program.includes.is_empty() && program.imports.is_empty() {
                             auto_loaded_defs = extract_and_stamp_func_defs(&program.expr, jq_path);
                         } else {
                             // Its directives resolve against the search path, which is
                             // not complete until the end of this function, and a failure
                             // is a compile error this constructor cannot return (#5339).
+                            dot_jq_path = Some(jq_path.clone());
                             dot_jq = Some(DotJq {
                                 program,
                                 contents,
