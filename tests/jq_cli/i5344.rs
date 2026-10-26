@@ -75,6 +75,9 @@ fn test_module_metadata_folds_constant_expressions_5344() -> Result<()> {
             "module {a:true, b:false, c:null};",
             r#"{"a":true,"b":false,"c":null,"#,
         ),
+        // A `-` in an exponent is part of the number, not a unary minus.
+        ("module {a:1e-5};", r#"{"a":0.00001,"#),
+        ("module {a:1E-5, b:2.5e+3};", r#"{"a":0.00001,"b":2.5E+3,"#),
         // A `-` that subtracts, or sits in a string or a comment, is not a unary minus.
         ("module {a:(5-3)};", r#"{"a":2,"#),
         ("module {a:(5 - 3)};", r#"{"a":2,"#),
