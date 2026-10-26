@@ -2564,10 +2564,31 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// The name after a `$`: an identifier, and in jq mode also `ns::name` (any number of
+    /// `::` parts), which jq's lexer reads as one `BINDING` token (#5295). That is how a data
+    /// import `import "d" as $a;` is also reachable as `$a::a`. The `::` takes no whitespace,
+    /// and one not followed by an identifier is left for the caller to reject.
+    fn parse_variable_name(&mut self) -> Result<String, ParseError> {
+        let mut name = self.parse_ident()?;
+        if self.mode == ParserMode::Jq {
+            while self.peek_str(2) == "::"
+                && self.input[self.pos + 2..]
+                    .chars()
+                    .next()
+                    .is_some_and(is_ident_start_char)
+            {
+                self.pos += 2;
+                name.push_str("::");
+                name.push_str(&self.parse_ident()?);
+            }
+        }
+        Ok(name)
+    }
+
     fn parse_dollar_name(&mut self) -> Result<(String, usize, bool), ParseError> {
         let line = self.current_line();
         self.next();
-        let name = self.parse_ident()?;
+        let name = self.parse_variable_name()?;
         self.skip_ws();
         let has_colon = self.peek() == Some(':');
         Ok((name, line, has_colon))
@@ -3608,7 +3629,7 @@ impl<'a> Parser<'a> {
                 let sigil_offset = self.pos;
                 let line = self.current_line();
                 self.next();
-                let name = self.parse_ident()?;
+                let name = self.parse_variable_name()?;
                 let expr = dollar_var_expr(name, line);
                 if let Expr::Var(name) = &expr {
                     self.var_sites.push(VarSite {
@@ -4746,7 +4767,7 @@ impl<'a> Parser<'a> {
                 // Simple variable: $var
                 let sigil_offset = self.pos;
                 self.next();
-                let name = self.parse_ident()?;
+                let name = self.parse_variable_name()?;
                 self.reject_loc_as_binding_name(
                     &name,
                     Some("BINDING or '[' or '{'"),
@@ -5084,7 +5105,11 @@ impl<'a> Parser<'a> {
                 if is_dollar {
                     self.next();
                 }
-                let name = self.parse_ident()?;
+                let name = if is_dollar {
+                    self.parse_variable_name()?
+                } else {
+                    self.parse_ident()?
+                };
                 if is_dollar {
                     self.reject_loc_as_binding_name(&name, Some("IDENT or BINDING"), sigil_offset)?;
                 }

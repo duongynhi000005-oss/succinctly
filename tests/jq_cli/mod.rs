@@ -144,6 +144,7 @@ mod i5288;
 mod i5291;
 mod i5293;
 mod i5294;
+mod i5295;
 mod i5296;
 mod i5297;
 mod i5298;
