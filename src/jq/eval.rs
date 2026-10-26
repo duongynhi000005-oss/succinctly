@@ -105992,8 +105992,8 @@ mod tests {
     /// prefix of their input array, as numbers (`broken_down_array_fields`
     /// has no `String` arm), so an undecodable string sitting in an element
     /// neither function reads at all -- one past the 8th -- must not fail a
-    /// conversion that would otherwise succeed. An initial fix recursively decode-checked
-    /// the whole array via `to_owned` and regressed exactly this;
+    /// conversion that would otherwise succeed. An initial fix recursively
+    /// decode-checked the whole array via `to_owned` and regressed exactly this;
     /// both now use `scalar_decode_failure` (checks only the top-level
     /// value itself) ahead of a plain, unchecked `to_owned_lossy`.
     #[test]

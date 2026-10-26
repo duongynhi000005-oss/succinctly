@@ -252,3 +252,14 @@ fn test_broken_down_time_needs_eight_number_fields_5301() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn test_mktime_try_skips_a_bad_broken_down_time_5301() -> Result<()> {
+    let (out, code) = run_jq_stdin(
+        "[.[] | mktime?]",
+        "[[2020,1,2,3,4,5],[2020,1,2,3,4,5,6,7],[2020,\"a\",2,3,4,5,6,7],[2020,1,2,3,4,5,6]]",
+        &["-c"],
+    )?;
+    assert_eq!((out.as_str(), code), ("[1580612645]\n", 0));
+    Ok(())
+}
