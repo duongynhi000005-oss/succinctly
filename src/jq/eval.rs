@@ -22085,11 +22085,11 @@ fn quote_csv_field<S: EvalSemantics>(s: &str) -> String {
 /// `@tsv` and `@html` (confirmed live against jq 1.7.1; `@uri`/`@base64`/
 /// `@text`/`@json` already agree). yq passes the NUL through raw (confirmed
 /// against yq v4.x), so the rewrite is jq-mode only.
-fn escape_nul<S: EvalSemantics>(s: &str) -> std::borrow::Cow<'_, str> {
+fn escape_nul<S: EvalSemantics>(s: &str) -> Cow<'_, str> {
     if S::TAG != EvalTag::Yq && s.contains('\0') {
-        std::borrow::Cow::Owned(s.replace('\0', "\\0"))
+        Cow::Owned(s.replace('\0', "\\0"))
     } else {
-        std::borrow::Cow::Borrowed(s)
+        Cow::Borrowed(s)
     }
 }
 
