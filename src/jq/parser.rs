@@ -11677,29 +11677,27 @@ mod tests {
     #[test]
     fn interpolated_string_object_keys_5298() {
         let jq = |source: &str| parse_with_mode(source, ParserMode::Jq);
+        let first_key_is_expr = |source: &str| matches!(jq(source), Ok(Expr::Object(entries)) if matches!(entries[0].key, ObjectKey::Expr(_)));
+        let first_value_indexes_dot = |source: &str| {
+            matches!(jq(source), Ok(Expr::Object(entries))
+                if matches!(&entries[0].value, Expr::IndexExpr { target, .. } if **target == Expr::Identity))
+        };
         for source in [
             r#"{"a\(1)": 2}"#,
             r#"{@base64 "x\(.k)": 2}"#,
             r#"{"a\(1,2)": 3}"#,
         ] {
-            let Ok(Expr::Object(entries)) = jq(source) else {
-                panic!("`{source}` is not an object");
-            };
-            assert!(matches!(entries[0].key, ObjectKey::Expr(_)), "{source}");
+            assert!(first_key_is_expr(source), "{source}");
         }
         for source in [
             r#"{"a\(1)"}"#,
             r#"{@base64 "x\(.k)"}"#,
             r#"{"p\(.a|tostring)\(.b + 1)"}"#,
+            r#"{"a\((.a))\(-.b)"}"#,
+            r#"{"q\n\"\\\(.a)"}"#,
         ] {
-            let Ok(Expr::Object(entries)) = jq(source) else {
-                panic!("`{source}` is not an object");
-            };
-            assert!(matches!(entries[0].key, ObjectKey::Expr(_)), "{source}");
-            assert!(
-                matches!(&entries[0].value, Expr::IndexExpr { target, .. } if **target == Expr::Identity),
-                "{source}"
-            );
+            assert!(first_key_is_expr(source), "{source}");
+            assert!(first_value_indexes_dot(source), "{source}");
         }
         for source in [
             r#"{"a\(1,2)"}"#,
@@ -11713,8 +11711,10 @@ mod tests {
                 "{source}: {error}"
             );
         }
-        // A bare format is no key, and a plain string key is still a literal one.
+        // A bare format is no key, an unterminated string is still an error, and a plain string key
+        // stays a literal one.
         assert!(jq("{@base64}").is_err());
+        assert!(jq(r#"{"abc"#).is_err());
         assert!(matches!(
             jq(r#"{"a"}"#),
             Ok(Expr::Object(entries)) if matches!(&entries[0].key, ObjectKey::Literal(name) if name == "a")
