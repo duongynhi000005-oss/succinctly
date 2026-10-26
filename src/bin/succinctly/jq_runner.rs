@@ -179,6 +179,14 @@ type DepGroups = Vec<(u32, Option<String>, Vec<(String, Vec<Param>)>)>;
 /// [`ModuleLoader::new`] before any module can claim one.
 const AUTO_LOAD_RUN_ID: u32 = 0;
 
+/// A `~/.jq` file whose own `import`/`include` directives are still to be loaded (#5339).
+#[derive(Debug)]
+struct HomeFile {
+    path: PathBuf,
+    contents: String,
+    program: Program,
+}
+
 /// Module loader for resolving and loading jq modules.
 #[derive(Debug)]
 pub struct ModuleLoader {
@@ -207,6 +215,14 @@ pub struct ModuleLoader {
     reachable_calls: BTreeMap<String, Vec<BTreeSet<String>>>,
     /// Auto-loaded ~/.jq file definitions (if file exists): name, params, body
     auto_loaded_defs: FuncDefList,
+    /// A `~/.jq` file that has `import`/`include` directives of its own, until
+    /// [`Self::ensure_home_bound`] has loaded them and filled `auto_loaded_defs` (#5339). A
+    /// file without directives needs no loading and fills `auto_loaded_defs` in
+    /// [`Self::new`].
+    pending_home: Option<HomeFile>,
+    /// Whether [`Self::ensure_home_bound`] bound a `~/.jq` that has directives, which then
+    /// takes part in the walk over the module graph as a top-level entry.
+    home_bound: bool,
     /// The modules whose own dependencies are currently being loaded, as
     /// `(resolved canonical file, module path as written)`, outermost first
     /// (#2865).
@@ -1309,6 +1325,7 @@ impl ModuleLoader {
     pub fn new(library_paths: &[PathBuf]) -> Self {
         let mut lib_dirs = Vec::new();
         let mut auto_loaded_defs = Vec::new();
+        let mut pending_home = None;
 
         // Add command-line -L paths first
         for path in library_paths {
@@ -1345,7 +1362,15 @@ impl ModuleLoader {
                             AUTO_LOAD_RUN_ID,
                             canonical_or_self(&jq_path).to_string_lossy().into_owned(),
                         );
-                        auto_loaded_defs = extract_and_stamp_func_defs(&program.expr, jq_path);
+                        if program.includes.is_empty() && program.imports.is_empty() {
+                            auto_loaded_defs = extract_and_stamp_func_defs(&program.expr, jq_path);
+                        } else {
+                            pending_home = Some(HomeFile {
+                                path: jq_path,
+                                contents,
+                                program,
+                            });
+                        }
                     }
                 }
             } else if jq_path.is_dir() {
@@ -1371,6 +1396,8 @@ impl ModuleLoader {
             loaded_modules: BTreeMap::new(),
             reachable_calls: BTreeMap::new(),
             auto_loaded_defs,
+            pending_home,
+            home_bound: false,
             loading: Vec::new(),
             run_ids: BTreeMap::new(),
             run_origins,
@@ -1378,6 +1405,44 @@ impl ModuleLoader {
             deps_of: BTreeMap::new(),
             top_ids: Vec::new(),
         }
+    }
+
+    /// Load the `import`/`include` directives of a `~/.jq` file and bind its defs to them
+    /// (#5339), once; a no-op for a file without directives, which [`Self::new`] bound.
+    ///
+    /// `~/.jq` resolves its directives like a module does -- the current directory, then `-L` --
+    /// and, like a module, keeps what they bring in private: the main program sees `~/.jq`'s own
+    /// defs and neither its `import`ed namespaces nor its data bindings (captured live against
+    /// jq 1.7.1). It binds through [`Self::bind_module_defs`] for that reason.
+    ///
+    /// Called after the main program's own directives have loaded, because that is the order
+    /// jq reports in: with a missing module in both, only the main program's is printed. The
+    /// `Err` is the report for `~/.jq`'s own directives, walked as a program's are.
+    fn ensure_home_bound(&mut self) -> Result<(), ModuleLoadError> {
+        let Some(home) = self.pending_home.take() else {
+            return Ok(());
+        };
+        self.loading
+            .push((canonical_or_self(&home.path), "~/.jq".to_string()));
+        let deps = self.module_dep_defs(&home.program, AUTO_LOAD_RUN_ID);
+        self.loading.pop();
+        let (deps, data_bindings) = match deps {
+            Ok(deps) => deps,
+            Err(e) => return Err(self.failure_report(&home.program, e)),
+        };
+        let (defs, _) = Self::bind_module_defs(
+            home.program,
+            &home.contents,
+            home.path,
+            &deps,
+            data_bindings,
+        );
+        self.auto_loaded_defs = defs;
+        // Walked with the main program's own top-level directives, last: jq reports `~/.jq`'s
+        // modules after theirs ([`jq_report_order`]), and a stable sort keeps this entry behind
+        // any directive declared at the same index.
+        self.home_bound = true;
+        Ok(())
     }
 
     /// The library directories alone (`-L`, `JQ_LIBRARY_PATH`, `~/.jq`): the search path
@@ -1559,6 +1624,26 @@ impl ModuleLoader {
         self.loading.pop();
         let (deps, data_bindings) = deps?;
 
+        Ok(Self::bind_module_defs(
+            program,
+            &contents,
+            file_path,
+            &deps,
+            data_bindings,
+        ))
+    }
+
+    /// The second half of [`Self::load_and_bind_module`], once a module's own directives have
+    /// loaded: its defs, each wrapped in forwarding stubs for those directives' defs and in its
+    /// own data-import bindings. Shared with `~/.jq` (#5339), which binds its directives the
+    /// same way.
+    fn bind_module_defs(
+        program: Program,
+        contents: &str,
+        file_path: PathBuf,
+        deps: &DepGroups,
+        data_bindings: Vec<(String, OwnedValue)>,
+    ) -> (FuncDefList, Vec<BTreeSet<String>>) {
         // #2950: mirror `run_jq`'s own top-level two-phase parse (#2395) so a
         // `def` arriving through *this module's own* `include` can shadow a
         // builtin inside the module's body too -- #2865 put such a def in
@@ -1600,7 +1685,7 @@ impl ModuleLoader {
             // fallback comment gives in full: this can only succeed wherever
             // the plain parse above did.
             jq::parse_program_with_extra_shadowable_defs(
-                &contents,
+                contents,
                 jq::ParserMode::Jq,
                 false,
                 &module_def_names,
@@ -1678,7 +1763,7 @@ impl ModuleLoader {
             })
             .unzip();
 
-        Ok((own, reachable))
+        (own, reachable)
     }
 
     /// The signature of every def one module's own `include`/`import`
@@ -1928,6 +2013,14 @@ impl ModuleLoader {
                 return Err(self.failure_report(program, e));
             }
         }
+        // A `~/.jq` with directives of its own is loaded after the program's (#5339), and its
+        // defs are in scope like any other `~/.jq`'s.
+        self.ensure_home_bound()?;
+        names.extend(
+            self.auto_loaded_defs
+                .iter()
+                .map(|(name, _, _)| name.clone()),
+        );
         Ok(names)
     }
 
@@ -2067,6 +2160,16 @@ impl ModuleLoader {
             let id = self.run_id_for(&import.path);
             top_ids.push((import.decl_index, id));
             import_runs.push((id, import.alias.as_str()));
+        }
+
+        // #5339: a `~/.jq` with `import`/`include` directives of its own loads after the
+        // program's, so a failure in both reports the program's, as jq does. It walks the module
+        // graph as one more top-level entry, at index 0 and pushed last, which the stable
+        // last-declared-first sort in `walk_modules` leaves behind every directive of the
+        // program's (including the one at index 0).
+        self.ensure_home_bound()?;
+        if self.home_bound {
+            top_ids.push((0, AUTO_LOAD_RUN_ID));
         }
 
         // Top-level data imports' bindings (#2956), substituted into the
