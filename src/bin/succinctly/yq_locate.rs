@@ -45,8 +45,14 @@ pub enum LocateFormat {
 /// Run the yq-locate command
 pub fn run_yq_locate(args: YqLocateArgs) -> Result<i32> {
     // Read the file
-    let text = std::fs::read(&args.file)
+    let file_bytes = std::fs::read(&args.file)
         .with_context(|| format!("Failed to read file: {}", args.file.display()))?;
+
+    // #5356: a leading UTF-8 byte-order mark is not part of the document. `succinctly yq` drops it
+    // before indexing, so `at_offset(n)` and `at_position` count from the first byte after it,
+    // and so does this -- as `jq-locate` does (#5313).
+    let bom_len = crate::front_matter::leading_bom_len(&file_bytes);
+    let text = &file_bytes[bom_len..];
 
     // Unlike `yq`/`yq --validate`/`at_offset` (which all reject invalid UTF-8
     // at the input boundary, #1391/#1242), `yq-locate` keeps answering on an
@@ -55,7 +61,7 @@ pub fn run_yq_locate(args: YqLocateArgs) -> Result<i32> {
     // for a diagnostic tool, not an edge case, so the tool stays useful right
     // where it's needed most. A stderr warning stops the silent
     // self-disagreement with the rest of the yq surface without losing that.
-    if let Err(err) = succinctly::text::utf8::validate_utf8(&text) {
+    if let Err(err) = succinctly::text::utf8::validate_utf8(text) {
         eprintln!("Warning: input is not valid UTF-8: {err}");
     }
 
@@ -64,7 +70,7 @@ pub fn run_yq_locate(args: YqLocateArgs) -> Result<i32> {
         (Some(off), None, None) => off,
         (None, Some(line), Some(column)) => {
             // Build the line index to convert line/column to offset
-            let line_index = LineIndex::build(&text);
+            let line_index = LineIndex::build(text);
             line_index
                 .to_offset(line, column)
                 .with_context(|| format!("Invalid position: line {line} column {column}"))?
@@ -77,19 +83,24 @@ pub fn run_yq_locate(args: YqLocateArgs) -> Result<i32> {
 
     // Validate offset
     if offset >= text.len() {
+        let after_bom = if bom_len > 0 {
+            format!(", {} after the {bom_len}-byte byte-order mark", text.len())
+        } else {
+            String::new()
+        };
         anyhow::bail!(
-            "Offset {} is out of bounds (file size: {} bytes)",
+            "Offset {} is out of bounds (file size: {} bytes{after_bom})",
             offset,
-            text.len()
+            file_bytes.len()
         );
     }
 
     // Build the YAML index
-    let index = YamlIndex::build(&text)
+    let index = YamlIndex::build(text)
         .with_context(|| format!("Failed to parse YAML file: {}", args.file.display()))?;
 
     // Locate the position
-    let result = locate_offset_detailed(&index, &text, offset)
+    let result = locate_offset_detailed(&index, text, offset)
         .with_context(|| format!("Could not locate position at offset {offset}"))?;
 
     // Output
@@ -98,11 +109,15 @@ pub fn run_yq_locate(args: YqLocateArgs) -> Result<i32> {
             println!("{}", result.expression);
         }
         LocateFormat::Json => {
-            let json = serde_json::json!({
+            let mut json = serde_json::json!({
                 "expression": result.expression,
                 "type": result.value_type,
                 "byte_range": [result.byte_range.0, result.byte_range.1],
             });
+            // `byte_range` counts from after the mark; a caller slicing the file adds this back.
+            if bom_len > 0 {
+                json["bom_length"] = serde_json::json!(bom_len);
+            }
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
     }

@@ -934,12 +934,20 @@ fn yaml_to_owned_value<W: AsRef<[u64]> + Clone>(cursor: YamlCursor<'_, W>) -> Re
 /// be known to be empty before it is read, so a run mixing it with empty files reads nothing from
 /// those.
 fn empty_input_reads_as(
-    bytes: Vec<u8>,
+    mut bytes: Vec<u8>,
     format: InputFormat,
     input_files: &[String],
     at: usize,
     front_matter: bool,
 ) -> Option<Vec<u8>> {
+    // #5356: yq reads past a UTF-8 byte-order mark at the front of a YAML stream, each file
+    // being a stream of its own; it was becoming part of the first key. A JSON document with
+    // one is `invalid character 'ï'` in yq, so JSON keeps its mark and is refused as before.
+    // Done here, where every route's bytes pass before anything is indexed, and ahead of the
+    // emptiness test: a file that is only the mark reads as an empty one.
+    if format != InputFormat::Json {
+        bytes.drain(..crate::front_matter::leading_bom_len(&bytes));
+    }
     if !bytes.is_empty() || front_matter {
         return Some(bytes);
     }

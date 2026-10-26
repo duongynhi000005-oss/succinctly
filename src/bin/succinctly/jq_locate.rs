@@ -52,11 +52,7 @@ pub fn run_jq_locate(args: JqLocateArgs) -> Result<i32> {
     // #5313: a leading UTF-8 byte-order mark is not part of the document. `succinctly jq` drops it
     // before indexing (#5291), so `at_offset(n)` and `at_position` count from the first byte after
     // it, and so does this: the same `n` names the same node in both. Editors show the same text.
-    let bom_len = if file_bytes.starts_with(crate::front_matter::UTF8_BOM) {
-        crate::front_matter::UTF8_BOM.len()
-    } else {
-        0
-    };
+    let bom_len = crate::front_matter::leading_bom_len(&file_bytes);
     let text = &file_bytes[bom_len..];
 
     // Determine the byte offset

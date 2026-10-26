@@ -297,3 +297,59 @@ fn jq_locate_and_at_offset_agree_on_a_bom_prefixed_file() -> Result<()> {
     );
     Ok(())
 }
+
+/// #5356: `yq-locate` skips a leading UTF-8 byte-order mark as `jq-locate` does (#5313), because
+/// `succinctly yq` drops it before indexing: a BOM-prefixed file answers as the same file without
+/// it, and the `json` format says how many bytes were skipped.
+#[test]
+fn yq_locate_and_at_offset_agree_on_a_bom_prefixed_file() -> Result<()> {
+    let doc = b"a: 1\nb:\n  c: 2\n";
+    let mut bom_file = tempfile::NamedTempFile::new().expect("create temp fixture");
+    std::io::Write::write_all(&mut bom_file, b"\xef\xbb\xbf").expect("write fixture");
+    std::io::Write::write_all(&mut bom_file, doc).expect("write fixture");
+    let mut plain_file = tempfile::NamedTempFile::new().expect("create temp fixture");
+    std::io::Write::write_all(&mut plain_file, doc).expect("write fixture");
+    let bom = bom_file.path().to_str().expect("utf8 path");
+    let plain = plain_file.path().to_str().expect("utf8 path");
+
+    for offset in ["0", "3", "5", "11", "14"] {
+        let (located, stderr, code) = run(&["yq-locate", bom, "--offset", offset])?;
+        assert_eq!(code, 0, "offset {offset}: {stderr}");
+        let (plain_located, _, _) = run(&["yq-locate", plain, "--offset", offset])?;
+        assert_eq!(located, plain_located, "offset {offset}");
+        let (by_offset, stderr, code) = run(&[
+            "yq",
+            "-o=json",
+            "-I=0",
+            &format!("at_offset({offset})"),
+            bom,
+        ])?;
+        assert_eq!(code, 0, "at_offset({offset}): {stderr}");
+        let (plain_by_offset, _, _) = run(&[
+            "yq",
+            "-o=json",
+            "-I=0",
+            &format!("at_offset({offset})"),
+            plain,
+        ])?;
+        assert_eq!(by_offset, plain_by_offset, "offset {offset}");
+    }
+    let (root, _, _) = run(&["yq-locate", bom, "--line", "1", "--column", "1"])?;
+    let (plain_root, _, _) = run(&["yq-locate", plain, "--line", "1", "--column", "1"])?;
+    assert_eq!(root, plain_root);
+
+    let (json, _, _) = run(&["yq-locate", bom, "--offset", "14", "--format", "json"])?;
+    let json: serde_json::Value = serde_json::from_str(&json)?;
+    assert_eq!(json["bom_length"], serde_json::json!(3));
+    let (json, _, _) = run(&["yq-locate", plain, "--offset", "14", "--format", "json"])?;
+    let json: serde_json::Value = serde_json::from_str(&json)?;
+    assert!(json.get("bom_length").is_none(), "{json}");
+
+    let (_, stderr, code) = run(&["yq-locate", bom, "--offset", "15"])?;
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("file size: 18 bytes, 15 after the 3-byte byte-order mark"),
+        "{stderr}"
+    );
+    Ok(())
+}

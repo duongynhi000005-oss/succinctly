@@ -57,6 +57,15 @@ impl std::error::Error for FrontMatterError {}
 /// there.
 pub(crate) const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
 
+/// The length of the UTF-8 byte-order mark at the front of `bytes`, or 0 if there is none (#5356).
+pub(crate) fn leading_bom_len(bytes: &[u8]) -> usize {
+    if bytes.starts_with(UTF8_BOM) {
+        UTF8_BOM.len()
+    } else {
+        0
+    }
+}
+
 /// Split `input` into its YAML front matter and trailing body.
 ///
 /// The input must start with a line that is exactly `---` (trailing

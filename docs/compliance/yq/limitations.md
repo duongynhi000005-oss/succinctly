@@ -581,6 +581,14 @@ the parser accepts, or in how a plain scalar's type resolves against a published
 below that line: it is settled by the spec succinctly targets and recorded on the relevant
 spec page, not by a rule-4 carve-out. This section exists so the case is not mistaken for one.
 
+### A leading byte-order mark is skipped, but yq's leading `---` echo differs after one (#5356)
+
+A UTF-8 byte-order mark at the front of a YAML file is dropped from each input before it is indexed, as yq does.
+A mark that is not at the front of a file stays data, and a JSON document with a mark is refused, as in yq.
+`yq-locate` and `at_offset`/`at_position` count from the first byte after the mark.
+yq prints no leading `---` for a BOM-prefixed file whose first line is `---`, where the same file without the mark prints it.
+This prints it in both cases ([#5357](https://github.com/rust-works/succinctly/issues/5357)).
+
 ### YAML 1.1 legacy numeric forms
 
 succinctly resolves plain scalars per the YAML **1.2** core schema
