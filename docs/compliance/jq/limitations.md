@@ -521,8 +521,8 @@ With no value it is shorthand, `{"a$\(1+1)"}` for `{"a$2": .["a$2"]}`, and `succ
 jq reads the key once and indexes with that value, so a string that yields several (`{"a\(1,2)"}`) pairs each key with its own value: `{"a1":.a1}` then `{"a2":.a2}`.
 This implementation reads the string twice, once as the key and once inside `.[K]`, which would pair every key with every value.
 A shorthand whose string is not surely one value is therefore refused at compile time (exit 3, `an interpolated object key written without a value must be a single value`) rather than answered differently.
-"Surely one value" is a syntactic check: fields, indices, literals, variables, formats, arithmetic and comparison of those, `tostring`/`length`/`type` and the case and rounding builtins, and array constructions.
-A call to anything else, an iteration, a comma or `empty` is refused, though some of them yield one value.
+"Surely one value" is a syntactic check: fields, indices, slices, literals, variables, formats, arithmetic, comparison, `and`/`or`, `//` and `if` over those, `tostring`/`length`/`type` and the case and rounding builtins, and array constructions.
+A call to anything else, an iteration, a comma, `empty` or a postfix `?` is refused, though some of them yield one value.
 A key with an explicit value (`{"a\(1,2)": 3}`) has no such limit and fans out as jq does.
 The exact pairing is tracked in [#5323](https://github.com/rust-works/succinctly/issues/5323).
 

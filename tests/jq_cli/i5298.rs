@@ -58,6 +58,12 @@ const ROWS: &[(&str, &str, i32)] = &[
     ("{\"\\(null)\"}", "{\"null\":null}\n", 0),
     ("{\"\\([.a])\"}", "{\"[1]\":null}\n", 0),
     ("{\"\\(.arr|length)\"}", "{\"2\":null}\n", 0),
+    ("{\"a\\(.a // 0)\"}", "{\"a1\":null}\n", 0),
+    ("{\"a\\(.zz // 0)\"}", "{\"a0\":null}\n", 0),
+    ("{\"a\\(if .a then 1 else 2 end)\"}", "{\"a1\":null}\n", 0),
+    ("{\"a\\(.k[1:])\"}", "{\"a\":1}\n", 0),
+    ("{\"a\\(.a and .b)\"}", "{\"atrue\":null}\n", 0),
+    ("{@base64 \"a\": 1}", "{\"a\":1}\n", 0),
 ];
 
 /// (input, filter, expected `-c` output, exit code).
@@ -71,6 +77,7 @@ const OTHER_INPUTS: &[(&str, &str, &str, i32)] = &[
 /// Shorthands over a string that may yield several values (or none): jq answers, this refuses at
 /// compile time (exit 3) rather than pair every key with every value.
 const REFUSED: &[&str] = &[
+    "{\"a\\(.x?)\"}",
     "{\"a\\(1,2)\"}",
     "{\"a\\(.arr[])\"}",
     "{@base64 \"a\\(1,2)\"}",

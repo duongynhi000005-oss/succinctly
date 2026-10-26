@@ -534,7 +534,21 @@ fn is_surely_single_valued(expr: &Expr) -> bool {
         | Expr::Not
         // An array collects whatever its body yields into one value.
         | Expr::Array(_) => true,
+        // One value, or a raised error: the shorthand is `.[K]` either way.
+        Expr::Slice { .. } => true,
         Expr::Paren(inner) | Expr::Negate(inner) => is_surely_single_valued(inner),
+        Expr::Alternative(left, right) | Expr::And(left, right) | Expr::Or(left, right) => {
+            is_surely_single_valued(left) && is_surely_single_valued(right)
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            is_surely_single_valued(cond)
+                && is_surely_single_valued(then_branch)
+                && is_surely_single_valued(else_branch)
+        }
         Expr::Pipe(stages) => stages.iter().all(is_surely_single_valued),
         Expr::Arithmetic { left, right, .. } | Expr::Compare { left, right, .. } => {
             is_surely_single_valued(left) && is_surely_single_valued(right)
@@ -2634,10 +2648,19 @@ impl<'a> Parser<'a> {
                         self.expect(')')?;
                         (ObjectKey::Expr(Box::new(key_expr)), None)
                     } else if let Some(key_string) = self.try_parse_interpolated_key()? {
-                        // #5298: jq's `String` production, with an interpolation or a format.
-                        // Its shorthand (`{"a\(1)"}`) is `{"a1": .["a1"]}`, the string read twice.
-                        string_key = Some(key_string.clone());
-                        (ObjectKey::Expr(Box::new(key_string)), None)
+                        match key_string {
+                            // A format over a string with no interpolation never runs (`@base64
+                            // "a"` is `"a"`): an ordinary literal key and its `.a` shorthand.
+                            Expr::Literal(Literal::String(name)) => {
+                                (ObjectKey::Literal(name), None)
+                            }
+                            // #5298: jq's `String` production, with an interpolation. Its
+                            // shorthand (`{"a\(1)"}`) is `{"a1": .["a1"]}`.
+                            key_string => {
+                                string_key = Some(key_string.clone());
+                                (ObjectKey::Expr(Box::new(key_string)), None)
+                            }
+                        }
                     } else if self.peek() == Some('"') {
                         // String key
                         let s = self.parse_string_literal()?;
@@ -2915,24 +2938,6 @@ impl<'a> Parser<'a> {
         Ok(ObjectEntry { key, value })
     }
 
-    /// The value of an object-construction entry.
-    ///
-    /// This position is jq's `ExpD`, not `Exp`. The `,` boundary is only one
-    /// half of what that means here:
-    ///
-    /// - the `,` separates entries, so a value must stop at it or `{a: 1,
-    ///   b: 2}` reads `1, b` as one value (#462);
-    /// - the `Exp`-level constructs jq 1.7.1 rejects *at compile time* in
-    ///   this position -- a bare `if`/`reduce`/`foreach`/`try`/`label`/`def`,
-    ///   an `as`-binding, a binary operator (`1+2`), or a generic trailing
-    ///   `?` (`error("x")?`) -- must be refused too, or `{a: if true then 1
-    ///   else 2 end}` quiet-accepts what real jq errors on ("unexpected if").
-    ///   Confirmed live against jq 1.7.1: bare `if` is exit 3 while
-    ///   `{a: (if true then 1 else 2 end)}` is fine.
-    ///
-    /// The restriction is jq-mode only. Real yq parses the same position as a
-    /// full expression, and its own precedence ranks `and`/`or` above `:` and
-    /// `,` -- see `parse_pipe_no_comma_with_booleans` (#2506).
     /// Whether the string literal at the cursor holds an interpolation (`\(`), without consuming it.
     fn string_literal_has_interpolation(&self) -> bool {
         let bytes = self.input.as_bytes();
@@ -2979,6 +2984,24 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// The value of an object-construction entry.
+    ///
+    /// This position is jq's `ExpD`, not `Exp`. The `,` boundary is only one
+    /// half of what that means here:
+    ///
+    /// - the `,` separates entries, so a value must stop at it or `{a: 1,
+    ///   b: 2}` reads `1, b` as one value (#462);
+    /// - the `Exp`-level constructs jq 1.7.1 rejects *at compile time* in
+    ///   this position -- a bare `if`/`reduce`/`foreach`/`try`/`label`/`def`,
+    ///   an `as`-binding, a binary operator (`1+2`), or a generic trailing
+    ///   `?` (`error("x")?`) -- must be refused too, or `{a: if true then 1
+    ///   else 2 end}` quiet-accepts what real jq errors on ("unexpected if").
+    ///   Confirmed live against jq 1.7.1: bare `if` is exit 3 while
+    ///   `{a: (if true then 1 else 2 end)}` is fine.
+    ///
+    /// The restriction is jq-mode only. Real yq parses the same position as a
+    /// full expression, and its own precedence ranks `and`/`or` above `:` and
+    /// `,` -- see `parse_pipe_no_comma_with_booleans` (#2506).
     fn parse_object_value(&mut self) -> Result<Expr, ParseError> {
         match self.mode {
             ParserMode::Jq => self.parse_expd_value(),
