@@ -12269,15 +12269,7 @@ fn owned_assign_pipe_stages<S: EvalSemantics>(expr: &Expr) -> Option<&[Expr]> {
 /// [`owned_assign_shape`] is the point: it admits a closed pipe by its head alone, whose later
 /// stages could fan out, and `//` and `as`, whose other side is anything.
 fn owned_one_value_assign_shape(stage: &Expr) -> bool {
-    fn path_shape(path: &Expr) -> bool {
-        match path {
-            Expr::Identity | Expr::Field(_) | Expr::Index { key: None, .. } => true,
-            Expr::Paren(inner) => path_shape(inner),
-            Expr::Pipe(stages) => stages.iter().all(path_shape),
-            Expr::IndexExpr { target, key } => path_shape(target) && owned_state_expr_shape(key),
-            _ => false,
-        }
-    }
+    let path_shape = |path: &Expr| owned_assign_path_shape(path, &owned_state_expr_shape);
     match unwrap_paren(stage) {
         Expr::Assign { path, value }
         | Expr::CompoundAssign { path, value, .. }
@@ -12473,6 +12465,21 @@ fn is_plain_owned_assign(expr: &Expr) -> bool {
     )
 }
 
+/// The path grammar of [`owned_assign_shape`]: static steps and index keys that satisfy `key_ok`,
+/// in any pipe and paren nesting. One definition for the two gates that differ only in the keys
+/// they admit ([`owned_one_value_assign_shape`] admits the ones that are one value).
+fn owned_assign_path_shape(path: &Expr, key_ok: &dyn Fn(&Expr) -> bool) -> bool {
+    match path {
+        Expr::Identity | Expr::Field(_) | Expr::Index { key: None, .. } => true,
+        Expr::Paren(inner) => owned_assign_path_shape(inner, key_ok),
+        Expr::Pipe(stages) => stages
+            .iter()
+            .all(|stage| owned_assign_path_shape(stage, key_ok)),
+        Expr::IndexExpr { target, key } => owned_assign_path_shape(target, key_ok) && key_ok(key),
+        _ => false,
+    }
+}
+
 /// The structural half of [`owned_assign_step`]'s eligibility, with nothing
 /// evaluated: a path of static steps and keys that are closed or read `.`
 /// ([`owned_state_expr_shape`], #5263), and a right side or filter that is
@@ -12480,17 +12487,11 @@ fn is_plain_owned_assign(expr: &Expr) -> bool {
 /// to hold is still [`owned_assign_step`]'s to decide, so this only saves a
 /// pipe whose stage can never qualify from starting at all.
 fn owned_assign_shape(expr: &Expr) -> bool {
-    fn path_shape(path: &Expr) -> bool {
-        match path {
-            Expr::Identity | Expr::Field(_) | Expr::Index { key: None, .. } => true,
-            Expr::Paren(inner) => path_shape(inner),
-            Expr::Pipe(stages) => stages.iter().all(path_shape),
-            Expr::IndexExpr { target, key } => {
-                path_shape(target) && (closed_expr_shape(key) || owned_state_expr_shape(key))
-            }
-            _ => false,
-        }
-    }
+    let path_shape = |path: &Expr| {
+        owned_assign_path_shape(path, &|key| {
+            closed_expr_shape(key) || owned_state_expr_shape(key)
+        })
+    };
     match expr {
         Expr::Alternative(left, _) => owned_assign_shape(unwrap_paren(left)),
         // The body still holds the bound `$n` as a free variable here, which
@@ -12818,7 +12819,8 @@ enum OwnedAssignRhs<'f> {
 ///
 /// Not only the fold loops reach this: [`eval_owned_reindex_free`] answers
 /// the same shapes for any owned input (`map(.k = 1)` over a constructed
-/// array), on a copy-on-write clone of it.
+/// array), on a copy-on-write clone of it. A fold's pipe of these steps is
+/// [`owned_assign_pipe_step`]'s, on the moved state (#5285).
 ///
 /// It runs while the #2889 embed table is live too (#3241): it reads no
 /// marker and no table entry, and a write to a container the table registered
@@ -75757,6 +75759,10 @@ fn fold_step_each<S: EvalSemantics>(
 /// the table, a closed one is not); a left-associated chain of arithmetic on the accumulator
 /// (`. + a + b`) is applied link by link ([`owned_arith_chain_step`], not under the table); and
 /// the single-field append of [`owned_assign_step`].
+///
+/// Also taken (#5285): a pipe of assignments, stage by stage on the moved state
+/// ([`owned_assign_pipe_step`], jq mode, not under the table), so a field one stage extends is not
+/// copied by the next.
 ///
 /// While the #2889 embed table is live (the loop runs inside an `as` binding
 /// that holds a document node) only the assignment half of the step runs -- not
