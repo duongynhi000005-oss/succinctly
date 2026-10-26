@@ -1576,6 +1576,10 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse a number literal (integer or float).
+    ///
+    /// jq mode also reads one with no integer part (`.5`, `.00005`, #5299): the caller has
+    /// checked a digit follows the `.`. The text is then read as if it began `0`, which is
+    /// the spelling jq's decNumber prints it with (`.50` is `0.50`).
     fn parse_number_literal(&mut self) -> Result<Literal, ParseError> {
         let start = self.pos;
 
@@ -1584,22 +1588,25 @@ impl<'a> Parser<'a> {
             self.next();
         }
 
-        // Must have at least one digit
-        match self.peek() {
-            Some(c) if c.is_ascii_digit() => {
-                self.next();
+        let leading_dot = self.pos == start && self.peek() == Some('.');
+        if !leading_dot {
+            // Must have at least one digit
+            match self.peek() {
+                Some(c) if c.is_ascii_digit() => {
+                    self.next();
+                }
+                _ => {
+                    return Err(ParseError::new("expected digit", self.pos));
+                }
             }
-            _ => {
-                return Err(ParseError::new("expected digit", self.pos));
-            }
-        }
 
-        // Consume remaining digits
-        while let Some(c) = self.peek() {
-            if c.is_ascii_digit() {
-                self.next();
-            } else {
-                break;
+            // Consume remaining digits
+            while let Some(c) = self.peek() {
+                if c.is_ascii_digit() {
+                    self.next();
+                } else {
+                    break;
+                }
             }
         }
 
@@ -1639,7 +1646,14 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let num_str = &self.input[start..self.pos];
+        let spelled = &self.input[start..self.pos];
+        let zero_led;
+        let num_str = if leading_dot {
+            zero_led = format!("0{spelled}");
+            zero_led.as_str()
+        } else {
+            spelled
+        };
         // #2936: the literal's double follows the mode. jq reads a program
         // literal through the same 17-digit decNumber rounding it applies to
         // a document number (`2.7293109604053567083 + 0` is
@@ -3309,6 +3323,20 @@ impl<'a> Parser<'a> {
                     };
                     return Ok(Expr::Negate(Box::new(operand)));
                 }
+            }
+
+            // #5299: in jq a `.` followed by a digit is a number (`.5`, `.00005`), as its lexer
+            // takes the longest token. yq keeps a field name there (`.1` is the key `1`).
+            Some('.')
+                if self.mode == ParserMode::Jq
+                    && self
+                        .peek_str(2)
+                        .chars()
+                        .nth(1)
+                        .is_some_and(|c| c.is_ascii_digit()) =>
+            {
+                let lit = self.parse_number_literal()?;
+                self.postfix_if_jq(Expr::Literal(lit))
             }
 
             // Dot-based expressions
@@ -11281,7 +11309,8 @@ mod tests {
         // Note: "foo" now parses as FuncCall{name:"foo", args:[]} - valid syntax for user functions
         assert!(parse(".[").is_err()); // unclosed bracket
         assert!(parse(".[1 2]").is_err()); // missing ']' after the key
-        assert!(parse(".123").is_err()); // field starting with number
+        assert!(parse(".a.123").is_err()); // field starting with number
+        assert!(matches!(parse(".123").unwrap(), Expr::Literal(_))); // a number, #5299
         assert!(parse("{").is_err()); // unclosed brace
         assert!(parse("[").is_err()); // unclosed bracket
         assert!(parse("\"unterminated").is_err()); // unterminated string
@@ -12293,10 +12322,12 @@ mod tests {
         }
         // `.a*=2` is `.a* = 2`: the `=` ends the name.
         assert!(matches!(yq(".a*=2"), Expr::Assign { .. }));
-        // jq mode keeps `*` an operator and has no digit-leading field.
+        // jq mode keeps `*` an operator and has no digit-leading field: `.1` is the number
+        // 0.1 (#5299), and after a term it is a syntax error.
         let jq = |s: &str| parse_with_mode(s, ParserMode::Jq);
         assert!(matches!(jq(".a*2").unwrap(), Expr::Arithmetic { .. }));
-        assert!(jq(".1").is_err());
+        assert!(matches!(jq(".1").unwrap(), Expr::Literal(_)));
+        assert!(jq(".a.1").is_err());
     }
 
     #[test]
