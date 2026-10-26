@@ -1010,7 +1010,7 @@ fn test_parity_number_literal_reaches_more_numeric_arg_builtins_387() {
         // Float-repr'd `NumberLiteral` index.
         (br"[10,20,30,1]", "setpath([.[-1]]; 99)", "[10,99,30,1]"),
         (br"[10,20,30,1.7]", "setpath([.[-1]]; 99)", "[10,99,30,1.7]"),
-        (br"[2020.0,0,1,0,0,0]", "mktime", "1577836800"),
+        (br"[2020.0,0,1,0,0,0,0,0]", "mktime", "1577836800"),
         (br"[1,2,3,2]", "[combinations(.[-1])] | length", "16"),
         (br"[10,20,30,1]", "omit([.[-1]])", "[10,30,1]"),
         (br"[10,20,30,1.0]", "omit([.[-1]])", "[10,30,1.0]"),
