@@ -46,25 +46,25 @@ pub enum LocateFormat {
 /// Run the jq-locate command
 pub fn run_jq_locate(args: JqLocateArgs) -> Result<i32> {
     // Read the file
-    let mut text = std::fs::read(&args.file)
+    let file_bytes = std::fs::read(&args.file)
         .with_context(|| format!("Failed to read file: {}", args.file.display()))?;
 
     // #5313: a leading UTF-8 byte-order mark is not part of the document. `succinctly jq` drops it
     // before indexing (#5291), so `at_offset(n)` and `at_position` count from the first byte after
     // it, and so does this: the same `n` names the same node in both. Editors show the same text.
-    let bom_len = if text.starts_with(crate::front_matter::UTF8_BOM) {
+    let bom_len = if file_bytes.starts_with(crate::front_matter::UTF8_BOM) {
         crate::front_matter::UTF8_BOM.len()
     } else {
         0
     };
-    text.drain(..bom_len);
+    let text = &file_bytes[bom_len..];
 
     // Determine the byte offset
     let offset = match (args.offset, args.line, args.column) {
         (Some(off), None, None) => off,
         (None, Some(line), Some(column)) => {
             // Build the line index to convert line/column to offset
-            let line_index = LineIndex::build(&text);
+            let line_index = LineIndex::build(text);
             line_index
                 .to_offset(line, column)
                 .with_context(|| format!("Invalid position: line {line} column {column}"))?
@@ -78,22 +78,22 @@ pub fn run_jq_locate(args: JqLocateArgs) -> Result<i32> {
     // Validate offset
     if offset >= text.len() {
         let after_bom = if bom_len > 0 {
-            format!(", after a {bom_len}-byte byte-order mark")
+            format!(", {} after the {bom_len}-byte byte-order mark", text.len())
         } else {
             String::new()
         };
         anyhow::bail!(
             "Offset {} is out of bounds (file size: {} bytes{after_bom})",
             offset,
-            text.len()
+            file_bytes.len()
         );
     }
 
     // Build the JSON index
-    let index = JsonIndex::build(&text);
+    let index = JsonIndex::build(text);
 
     // Locate the position
-    let result = locate_offset_detailed(&index, &text, offset)
+    let result = locate_offset_detailed(&index, text, offset)
         .with_context(|| format!("Could not locate position at offset {offset}"))?;
 
     // Output
@@ -102,11 +102,15 @@ pub fn run_jq_locate(args: JqLocateArgs) -> Result<i32> {
             println!("{}", result.expression);
         }
         LocateFormat::Json => {
-            let json = serde_json::json!({
+            let mut json = serde_json::json!({
                 "expression": result.expression,
                 "type": result.value_type,
                 "byte_range": [result.byte_range.0, result.byte_range.1],
             });
+            // `byte_range` counts from after the mark; a caller slicing the file adds this back.
+            if bom_len > 0 {
+                json["bom_length"] = serde_json::json!(bom_len);
+            }
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
     }

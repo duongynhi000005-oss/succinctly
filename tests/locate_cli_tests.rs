@@ -258,16 +258,41 @@ fn jq_locate_and_at_offset_agree_on_a_bom_prefixed_file() -> Result<()> {
     let (alice, _, _) = run(&["jq-locate", bom, "--line", "1", "--column", "10"])?;
     assert_eq!(alice, ".name");
 
-    // The byte range counts from the first byte after the mark.
+    // The byte range counts from the first byte after the mark, and `bom_length` says how many
+    // bytes that is; a file without a mark has no such field.
     let (json, _, _) = run(&["jq-locate", bom, "--offset", "12", "--format", "json"])?;
     let json: serde_json::Value = serde_json::from_str(&json)?;
     assert_eq!(json["byte_range"], serde_json::json!([9, 16]));
+    assert_eq!(json["bom_length"], serde_json::json!(3));
+    let (json, _, _) = run(&["jq-locate", plain, "--offset", "9", "--format", "json"])?;
+    let json: serde_json::Value = serde_json::from_str(&json)?;
+    assert_eq!(json["byte_range"], serde_json::json!([9, 16]));
+    assert!(json.get("bom_length").is_none(), "{json}");
+
+    // Later lines are not shifted, and a file that is only the mark has no document to locate.
+    let mut multi = tempfile::NamedTempFile::new().expect("create temp fixture");
+    std::io::Write::write_all(&mut multi, b"\xef\xbb\xbf{\n  \"k\": [10, 20]\n}\n")
+        .expect("write fixture");
+    let multi = multi.path().to_str().expect("utf8 path");
+    let (second, _, _) = run(&["jq-locate", multi, "--line", "2", "--column", "3"])?;
+    assert_eq!(second, ".k");
+    let (element, _, _) = run(&["jq-locate", multi, "--line", "2", "--column", "10"])?;
+    assert_eq!(element, ".k[0]");
+    let mut only_bom = tempfile::NamedTempFile::new().expect("create temp fixture");
+    std::io::Write::write_all(&mut only_bom, b"\xef\xbb\xbf").expect("write fixture");
+    let only_bom = only_bom.path().to_str().expect("utf8 path");
+    let (_, stderr, code) = run(&["jq-locate", only_bom, "--offset", "0"])?;
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("file size: 3 bytes, 0 after the 3-byte byte-order mark"),
+        "{stderr}"
+    );
 
     // The first byte past the document is out of bounds, and the message says the mark was skipped.
     let (_, stderr, code) = run(&["jq-locate", bom, "--offset", "28"])?;
     assert_ne!(code, 0);
     assert!(
-        stderr.contains("file size: 28 bytes, after a 3-byte byte-order mark"),
+        stderr.contains("file size: 31 bytes, 28 after the 3-byte byte-order mark"),
         "{stderr}"
     );
     Ok(())

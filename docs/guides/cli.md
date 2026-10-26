@@ -738,7 +738,7 @@ succinctly jq-locate <FILE> [OPTIONS]
 - `--column <COLUMN>`: Column number (1-indexed, byte offset within line)
 - `--format <FORMAT>`: Output format: `expression` (default) or `json`
 
-A leading UTF-8 byte-order mark is not part of the document: offsets, columns and the `json` output's byte range count from the first byte after it, the way `at_offset` and `at_position` in `succinctly jq` do (#5313).
+A leading UTF-8 byte-order mark is not part of the document: offsets, columns and the `json` output's `byte_range` count from the first byte after it, the way `at_offset` and `at_position` in `succinctly jq` do (#5313). For such a file the `json` output also carries `bom_length` (3), which a caller slicing the file adds to `byte_range`.
 
 ### Examples
 
