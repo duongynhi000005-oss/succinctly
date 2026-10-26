@@ -28,14 +28,14 @@ For jq *feature* coverage rather than error wording, see
 
 ## Summary
 
-Measured against jq-1.7.1 over the 273 probes in
+Measured against jq-1.7.1 over the 308 probes in
 [`tests/data/jq-error-probes.tsv`](../../../tests/data/jq-error-probes.tsv), through
 **both** evaluators — the full one (`src/jq/eval.rs`) and the generic one
 (`src/jq/eval_generic.rs`, which the CLI uses):
 
 | Dimension                                    | Result               | Meaning                                                |
 |----------------------------------------------|----------------------|--------------------------------------------------------|
-| **Message text** (both evaluators, verbatim) | **273/273 = 100.0%** | Byte-identical to jq                                   |
+| **Message text** (both evaluators, verbatim) | **308/308 = 100.0%** | Byte-identical to jq                                   |
 | **Wording divergences**                      | **0**                | Both evaluators raise, but word it differently from jq |
 | **Behaviour / parser gaps**                  | **0**                | succinctly does not raise the error at all             |
 
@@ -307,44 +307,43 @@ substitution into the more sensible WHATWG-consistent shape. See
 substitution-mechanism history and
 [#1717](https://github.com/rust-works/succinctly/issues/1717) for the algorithm fix itself.
 
-## Conversion diagnostics beyond a single token
+## Conversion diagnostics
 
-jq implements `tonumber` and `fromjson` by handing the string to its JSON parser, so a
-failure surfaces as that parser's diagnostic. succinctly reproduces the single-token
-form exactly:
+jq implements `tonumber` and `fromjson` by handing the string to its JSON parser, so a failure surfaces as that parser's diagnostic.
+That is the first fault the push parser meets, in the order it meets them, with the line and column it had reached ([#5309](https://github.com/rust-works/succinctly/issues/5309)).
+succinctly names the same fault.
+`src/jq/parse_message.rs` ports the error behaviour of jq 1.7.1's `jv_parse.c`: the tokenizer's literal and string checks, the container stack and the order in which a finished top-level value is handed back.
+It runs on the refusal path to word the message.
+The validator still decides *whether* a text parses.
 
 ```bash
 $ echo '"0x10"' | sjq -c 'try tonumber catch .'
 "Invalid numeric literal at EOF at line 1, column 4 (while parsing '0x10')"
+$ echo '"a,b"' | sjq -c 'try fromjson catch .'
+"Invalid numeric literal at line 1, column 2 (while parsing 'a,b')"
+$ echo '"[1,"' | sjq -c 'try fromjson catch .'
+"Unfinished JSON term at EOF at line 1, column 3 (while parsing '[1,')"
+$ echo '"1 2"' | sjq -c 'try fromjson catch .'
+"Unexpected extra JSON values (while parsing '1 2')"
 ```
 
-and distinguishes it from a string that *is* valid JSON but is not a number, which jq
-reports as the string itself:
+A string that *is* valid JSON but is not a number is reported by `tonumber` as the string itself:
 
 ```bash
 $ echo '"null"' | sjq -c 'try tonumber catch .'
 "string (\"null\") cannot be parsed as a number"
 ```
 
-Inputs that fail *after* a complete token get a different jq diagnostic that succinctly
-approximates to the EOF form:
+Held to jq 1.7.1 by a differential run over about 430,000 strings.
+That covers every string of up to six characters over a structural alphabet, and random strings drawn from a pool of numbers, literals, escapes, newlines, byte-order marks, control characters and non-ASCII whitespace.
 
-| Input     | jq                                                     | succinctly                                                           |
-|-----------|--------------------------------------------------------|----------------------------------------------------------------------|
-| `"1 2"`   | `Unexpected extra JSON values (while parsing '1 2')`   | `Invalid numeric literal at EOF at line 1, column 3 (while parsing '1 2')` |
-| `"1,2"`   | `Expected value before ',' at line 1, column 2 …`      | as above, with the EOF column                                        |
-| `"{"`     | `Unfinished JSON term at EOF at line 1, column 1 …`    | as above                                                             |
-| `"  a  "` | `Invalid numeric literal at line 1, column 4 …`        | as above, but with `at EOF` and column 5                             |
+Both builtins require the *whole* string to be one JSON value, which is the part that matters for the result rather than the message.
+`"0x10" | fromjson` errors as jq does instead of returning `0`, and `"1 2" | fromjson` errors instead of returning `1`.
+Only space, tab, CR and LF are whitespace to jq's parser, so `"\u000b1" | tonumber` is refused.
 
-Matching these needs a position-reporting JSON parser reporting jq's exact failure
-classes; the jq-mode `parse_complete_json` path validates the input but does not
-translate validation errors into jq's position-specific diagnostics.
-The shapes a filter is likely to branch on (`Invalid numeric literal`, `cannot be parsed
-as a number`) are exact, so this is left as a deliberate approximation.
-
-Both builtins do require the *whole* string to be one JSON value, which is the part that
-matters for the result rather than the message: `"0x10" | fromjson` errors as jq does
-instead of returning `0`, and `"1 2" | fromjson` errors instead of returning `1`.
+What is still not matched is on the *accepting* side, not the wording.
+The validator refuses a text jq reads, so the message here falls back to the older `Invalid numeric literal` form.
+The two cases are a bare trailing decimal point (`"5." | fromjson`, see the accepted divergence below) and a number token with a NUL after it (`"1\u00002" | fromjson`, which jq reads as `1` because it hands its number reader a C string).
 
 ## The math builtins print the platform libm's last bit, as jq does (#3045)
 

@@ -441,3 +441,43 @@ delpaths_bad_entry_dot	delpaths(.)	[1,"a",null]
 delpaths_bad_entry_after_array	delpaths([[1],"a",true])	[1,2]
 delpaths_bad_entry_object_last	delpaths([{},[0],"a"])	[1,2]
 delpaths_bad_entry_only_object	delpaths([{}])	[1,2]
+
+# ── #5309: fromjson/tonumber give the diagnostic of jq's push parser ───────────
+# The parser reports the first fault it meets, where it met it: a bare token ends at the
+# next delimiter (`Invalid numeric literal at line 1, column 2`, no `at EOF`), an open
+# container is `Unfinished JSON term`, a second value is `Unexpected extra JSON values`.
+fromjson_token_ends_at_comma	fromjson	"a,b"
+fromjson_token_ends_at_space	fromjson	"a b"
+fromjson_token_ends_at_close_bracket	fromjson	"[a]"
+tonumber_token_ends_at_comma	tonumber	"a,b"
+tonumber_unfinished_array	tonumber	"[1,"
+tonumber_extra_values	tonumber	"1 2"
+fromjson_unfinished_array	fromjson	"[1,"
+fromjson_unfinished_object	fromjson	"{"
+fromjson_trailing_comma_array	fromjson	"[1,]"
+fromjson_trailing_comma_object	fromjson	"{\"a\":1,}"
+fromjson_missing_colon	fromjson	"{\"a\" 1}"
+fromjson_missing_comma	fromjson	"[1 2]"
+fromjson_missing_value	fromjson	"{\"a\":}"
+fromjson_unmatched_brace	fromjson	"}"
+fromjson_unmatched_bracket	fromjson	"{]"
+fromjson_mismatched_close	fromjson	"[1}"
+fromjson_comma_at_top_level	fromjson	"1,2"
+fromjson_colon_after_number	fromjson	"1:2"
+fromjson_extra_numbers	fromjson	"1 2"
+fromjson_extra_literals	fromjson	"true false"
+fromjson_unfinished_string	fromjson	"\"abc"
+fromjson_bad_escape	fromjson	"\"a\\x\""
+fromjson_short_unicode_escape	fromjson	"\"\\u12\""
+fromjson_bad_unicode_escape	fromjson	"\"\\u12zz\""
+fromjson_lone_surrogate	fromjson	"\"\\ud800\""
+fromjson_control_char_in_string	fromjson	"\"a\u0001\""
+fromjson_truncated_null	fromjson	"nul"
+fromjson_overlong_true	fromjson	"truee"
+fromjson_bom_only	fromjson	"\ufeff"
+fromjson_doubled_bom	fromjson	"\ufeff\ufeff1"
+fromjson_whitespace_only	fromjson	" "
+fromjson_control_char_unit_separator	fromjson	"\"a\u001fb\""
+fromjson_control_char_record_separator	fromjson	"\"a\u001eb\""
+tonumber_vertical_tab_is_not_whitespace	tonumber	"\u000b1"
+tonumber_no_break_space_is_not_whitespace	tonumber	"\u00a01"

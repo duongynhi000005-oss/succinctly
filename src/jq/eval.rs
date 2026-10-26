@@ -22936,10 +22936,23 @@ pub(super) fn tonumber_from_str(s: &str, yq_mode: bool) -> Result<OwnedValue, Ev
     // jq's parser also skips one UTF-8 BOM before the whitespace (#5312), so `"\u{feff}1"` is 1;
     // a doubled one, or one behind whitespace, is refused. The errors below still name `s`, BOM
     // and all, as jq does.
+    //
+    // `tonumber` passes jq's parser a C string, so a NUL ends the text it sees (`"1\u00002" |
+    // tonumber` is 1); `fromjson`, which passes a length, does not (#5309).
+    let c_text = if yq_mode {
+        s
+    } else {
+        s.split('\0').next().unwrap_or(s)
+    };
     let trimmed = if yq_mode {
         s
     } else {
-        s.strip_prefix('\u{feff}').unwrap_or(s).trim()
+        // jq's parser skips only space, tab, CR and LF, not the Unicode whitespace `trim`
+        // knows (`"\u000b1" | tonumber` is refused).
+        c_text
+            .strip_prefix('\u{feff}')
+            .unwrap_or(c_text)
+            .trim_matches(|c| matches!(c, ' ' | '\t' | '\r' | '\n'))
     };
     // Materialize a JSON-shaped number as a `NumberLiteral` so it keeps its
     // *source spelling*, rather than collapsing it through a bare
@@ -23113,7 +23126,7 @@ pub(super) fn tonumber_from_str(s: &str, yq_mode: bool) -> Result<OwnedValue, Ev
             s.to_string().into(),
         )))
     } else {
-        Err(EvalError::invalid_numeric_literal_after_bom(s))
+        Err(EvalError::json_parse_failure(c_text))
     }
 }
 
@@ -23663,9 +23676,7 @@ fn builtin_fromjson<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                     Err(_) if S::TAG == EvalTag::Yq => {
                         QueryResult::Error(EvalError::invalid_numeric_literal(json_str))
                     }
-                    Err(_) => {
-                        QueryResult::Error(EvalError::invalid_numeric_literal_after_bom(json_str))
-                    }
+                    Err(_) => QueryResult::Error(EvalError::json_parse_failure(json_str)),
                 }
             }
             Err(e) => QueryResult::Error(EvalError::decode_failure(e.message())),
@@ -25479,6 +25490,18 @@ fn regex_non_string_input<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         return None;
     }
     Some(value.clone())
+}
+
+/// The refusal for a pattern that is not a string where the input is read first (#5309): the
+/// input's own refusal when it is not a string either, else the pattern's.
+fn regex_pattern_refusal<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
+    value: &StandardJson<'_, W>,
+    raw_pattern: &OwnedValue,
+) -> EvalError {
+    match regex_non_string_input::<W, S>(value) {
+        Some(input) => regex_input_refusal::<W, S>(&input),
+        None => EvalError::is_not_a_string(raw_pattern),
+    }
 }
 
 /// The refusal for an input that [`regex_non_string_input`] found not to be a string.
@@ -27536,11 +27559,7 @@ fn builtin_gsub_with_flags<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         ArgFanout::yq_native::<S>(),
         |raw_pattern| {
             let OwnedValue::String(pattern) = raw_pattern else {
-                // #5309: the input is read before the pattern.
-                return QueryResult::Error(match regex_non_string_input::<W, S>(&value) {
-                    Some(input) => regex_input_refusal::<W, S>(&input),
-                    None => EvalError::is_not_a_string(&raw_pattern),
-                });
+                return QueryResult::Error(regex_pattern_refusal::<W, S>(&value, &raw_pattern));
             };
             sub_with_resolved_pattern::<W, S>(
                 &pattern,
@@ -27594,11 +27613,7 @@ fn builtin_scan_with_flags<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         ArgFanout::All,
         |raw_pattern| {
             let OwnedValue::String(pattern) = raw_pattern else {
-                // #5309: the input is read before the pattern.
-                return QueryResult::Error(match regex_non_string_input::<W, S>(&value) {
-                    Some(input) => regex_input_refusal::<W, S>(&input),
-                    None => EvalError::is_not_a_string(&raw_pattern),
-                });
+                return QueryResult::Error(regex_pattern_refusal::<W, S>(&value, &raw_pattern));
             };
             scan_with_resolved_pattern::<W, S>(&pattern, "g", value.clone(), optional)
         },
@@ -27868,11 +27883,7 @@ fn builtin_splits_with_flags<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         |raw_pattern| {
             let global = "g".to_string();
             let OwnedValue::String(pattern) = raw_pattern else {
-                // #5309: the input is read before the pattern.
-                return QueryResult::Error(match regex_non_string_input::<W, S>(&value) {
-                    Some(input) => regex_input_refusal::<W, S>(&input),
-                    None => EvalError::is_not_a_string(&raw_pattern),
-                });
+                return QueryResult::Error(regex_pattern_refusal::<W, S>(&value, &raw_pattern));
             };
             splits_with_resolved_pattern::<W, S>(
                 &pattern,
@@ -92112,19 +92123,10 @@ pub(crate) fn delpaths_jq_prepare(paths: OwnedValue) -> Result<ArrayVec, EvalErr
     // first one written: `delpaths([1, "a", null])` is `not null` (#5309).
     // Only the kind is named, so the kind alone decides; a full value comparison would descend
     // into entries whose contents never reach the message.
-    let kind_rank = |value: &OwnedValue| match value {
-        OwnedValue::Null => 0,
-        OwnedValue::Bool(false) => 1,
-        OwnedValue::Bool(true) => 2,
-        OwnedValue::String(_) => 4,
-        OwnedValue::Array(_) => 5,
-        OwnedValue::Object(_) => 6,
-        _ => 3,
-    };
     if let Some(bad) = paths
         .iter()
         .filter(|p| !matches!(p, OwnedValue::Array(_)))
-        .min_by_key(|p| kind_rank(p))
+        .min_by_key(|p| sort_rank(p))
     {
         return Err(EvalError::path_must_be_array_not(bad.type_name()));
     }
@@ -126353,7 +126355,7 @@ mod tests {
             (
                 br#""1 2""#,
                 "fromjson",
-                Err("Invalid numeric literal at EOF at line 1, column 3 (while parsing '1 2')"),
+                Err("Unexpected extra JSON values (while parsing '1 2')"),
             ),
             (br#"" 42 ""#, "fromjson", Ok("42")),
             (br#""[1,2]""#, "fromjson", Ok("[1,2]")),

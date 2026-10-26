@@ -97,3 +97,58 @@ fn test_nth_in_a_path_position_5309() -> Result<()> {
     }
     Ok(())
 }
+
+/// `fromjson` and `tonumber` word a refusal as jq's push parser does: the first fault, where it
+/// was met. The one-line probes in `tests/data/jq-error-probes.tsv` hold the common shapes; these
+/// are the ones a one-line table cannot: a message spanning a newline, and a NUL, which jq's
+/// `fromjson` parses past (it takes a length) and its `tonumber` stops at (it takes a C string),
+/// and which both quote only up to.
+#[test]
+fn test_json_text_refusals_name_the_first_fault_5309() -> Result<()> {
+    for (filter, want) in [
+        // The line and column are the parser's, so a newline restarts the column.
+        (
+            "\"a\\n,b\" | try fromjson catch .",
+            "\"Invalid numeric literal at line 2, column 0 (while parsing 'a\\n,b')\"\n",
+        ),
+        // `fromjson` reads past the NUL, so the fault is later than the quotation shows.
+        (
+            "\"a\\u0000b c\" | try fromjson catch .",
+            "\"Invalid numeric literal at line 1, column 4 (while parsing 'a')\"\n",
+        ),
+        // `tonumber` stops at the NUL, so it sees (and quotes) only `x`.
+        (
+            "\"x\\u0000 y\" | try tonumber catch .",
+            "\"Invalid numeric literal at EOF at line 1, column 1 (while parsing 'x')\"\n",
+        ),
+        ("\"1\\u00002\" | tonumber", "1\n"),
+        // A NUL inside a string is a control character.
+        (
+            "\"\\\"a\\u0000\\\"\" | try fromjson catch .",
+            "\"Invalid string: control characters from U+0000 through U+001F must be escaped at line 1, column 4 (while parsing '\\\"a')\"\n",
+        ),
+        // jq's parser skips only space, tab, CR and LF: a vertical tab or a no-break space in
+        // front of a number is a bad literal for `tonumber` as it is for `fromjson`.
+        (
+            "\"\\u000b1\" | try tonumber catch .",
+            "\"Invalid numeric literal at EOF at line 1, column 2 (while parsing '\\u000b1')\"\n",
+        ),
+        ("\" 1\\t\\r\\n\" | tonumber", "1\n"),
+        // Whitespace round a lone value is fine; a second value is the fault.
+        ("\" 1 \" | fromjson", "1\n"),
+        ("\" 1 2 \" | try fromjson catch .", "\"Unexpected extra JSON values (while parsing ' 1 2 ')\"\n"),
+        // `tonumber` on valid JSON that is not a number is named as the string it is.
+        (
+            "\"[1]\" | try tonumber catch .",
+            "\"string (\\\"[1]\\\") cannot be parsed as a number\"\n",
+        ),
+        (
+            "\"[1,\" | try tonumber catch .",
+            "\"Unfinished JSON term at EOF at line 1, column 3 (while parsing '[1,')\"\n",
+        ),
+    ] {
+        let (out, err, code) = run(filter)?;
+        assert_eq!((out.as_str(), code), (want, 0), "{filter}: {err}");
+    }
+    Ok(())
+}
