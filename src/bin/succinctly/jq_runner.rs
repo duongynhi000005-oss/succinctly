@@ -557,16 +557,36 @@ fn read_arg_file(flag: &str, name: &str, file: &str) -> Result<String, BuildCont
 fn resolve_module_in(search_path: &[PathBuf], module_path: &str) -> Option<PathBuf> {
     // #2702: real jq appends `.jq` unconditionally -- `include "m.jq"` looks
     // for `m.jq.jq`, never `m.jq` itself. Confirmed live against jq 1.7.1.
-    let module_file = format!("{module_path}.jq");
+    resolve_with_suffix(search_path, module_path, ".jq")
+}
 
-    // Search in each path
+/// The first file jq finds for the relative `module_path` plus `suffix`, trying
+/// every spelling in one search directory before the next directory (#5294).
+///
+/// jq 1.7.1 looks for `m{suffix}`, then the directory-module spellings
+/// `m/jq/main{suffix}` and `m/<last component of m>{suffix}` (`b/b.jq` for
+/// `import "b"`, `p/q/q.jq` for `import "p/q"`), in that order -- confirmed live with
+/// all three present, where `b/jq/main.jq` beat `b/b.jq`, and with one directory
+/// holding `b/b.jq` ahead of a later one holding `b.jq`, where the earlier directory won.
+fn resolve_with_suffix(
+    search_path: &[PathBuf],
+    module_path: &str,
+    suffix: &str,
+) -> Option<PathBuf> {
+    let last = module_path.rsplit('/').next().unwrap_or(module_path);
+    let spellings = [
+        format!("{module_path}{suffix}"),
+        format!("{module_path}/jq/main{suffix}"),
+        format!("{module_path}/{last}{suffix}"),
+    ];
     for base in search_path {
-        let full_path = base.join(&module_file);
-        if full_path.is_file() {
-            return Some(full_path);
+        for spelling in &spellings {
+            let full_path = base.join(spelling);
+            if full_path.is_file() {
+                return Some(full_path);
+            }
         }
     }
-
     None
 }
 
@@ -578,14 +598,7 @@ fn resolve_module_in(search_path: &[PathBuf], module_path: &str) -> Option<PathB
 /// Confirmed live against jq 1.7.1, which resolves `import "data" as $d;`
 /// to `data.json` and reports `module not found: data` when there is none.
 fn resolve_data_file_in(search_path: &[PathBuf], module_path: &str) -> Option<PathBuf> {
-    let data_file = format!("{module_path}.json");
-    for base in search_path {
-        let full_path = base.join(&data_file);
-        if full_path.is_file() {
-            return Some(full_path);
-        }
-    }
-    None
+    resolve_with_suffix(search_path, module_path, ".json")
 }
 
 /// Load one **data** import's binding value (#2956): resolve `{path}.json`
