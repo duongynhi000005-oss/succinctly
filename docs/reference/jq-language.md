@@ -210,7 +210,8 @@ below and [ADR-0019](../adrs/adr-0019.md).
 - [x] Comments in jq expressions (`#` to end of line)
 - [x] `env`, `$ENV.VAR`, `env(VAR)`, `strenv(VAR)`
 - [x] `now` - Current Unix timestamp
-- [x] `builtins` - List all builtin function names
+- [x] `builtins` - List all builtin function names: jq 1.7.1's 218 `name/arity` entries, in jq's order, and no other (#5304).
+  A name that is only an extension here (`trim`, `leaf_paths`, the yq metadata getters) is callable but not listed.
 
 ### Assignment Operators
 - [x] `.a = value` - Simple assignment
