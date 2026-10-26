@@ -22914,7 +22914,15 @@ pub(super) fn tonumber_from_str(s: &str, yq_mode: bool) -> Result<OwnedValue, Ev
     // yq's `tonumber` does *no* trimming at all (`" 1 "`/`"1 "`/`"\t1"` all
     // error) -- yq mode must see the untouched string here, not jq's
     // trimmed one (#2960).
-    let trimmed = if yq_mode { s } else { s.trim() };
+    //
+    // jq's parser also skips one UTF-8 BOM before the whitespace (#5312), so `"\u{feff}1"` is 1;
+    // a doubled one, or one behind whitespace, is refused. The errors below still name `s`, BOM
+    // and all, as jq does.
+    let trimmed = if yq_mode {
+        s
+    } else {
+        s.strip_prefix('\u{feff}').unwrap_or(s).trim()
+    };
     // Materialize a JSON-shaped number as a `NumberLiteral` so it keeps its
     // *source spelling*, rather than collapsing it through a bare
     // `parse::<i64>()`/`parse::<f64>()` pair. Both oracles preserve the
@@ -23082,12 +23090,12 @@ pub(super) fn tonumber_from_str(s: &str, yq_mode: bool) -> Result<OwnedValue, Ev
     // The probe below is jq's question, and jq's alone. It distinguishes
     // "valid JSON but not a number" from "not valid JSON at all" purely to
     // pick between two error messages, never to return a value.
-    if parse_complete_json(trimmed, false).is_ok() {
+    if parse_complete_json_after_bom(trimmed, false).is_ok() {
         Err(EvalError::cannot_parse_as_number(&OwnedValue::String(
             s.to_string().into(),
         )))
     } else {
-        Err(EvalError::invalid_numeric_literal(s))
+        Err(EvalError::invalid_numeric_literal_after_bom(s))
     }
 }
 
@@ -23634,7 +23642,12 @@ fn builtin_fromjson<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                     Err(e) if e.starts_with(YQ_SCANNER_ERROR_PREFIX) => {
                         QueryResult::Error(EvalError::new(e))
                     }
-                    Err(_) => QueryResult::Error(EvalError::invalid_numeric_literal(json_str)),
+                    Err(_) if S::TAG == EvalTag::Yq => {
+                        QueryResult::Error(EvalError::invalid_numeric_literal(json_str))
+                    }
+                    Err(_) => {
+                        QueryResult::Error(EvalError::invalid_numeric_literal_after_bom(json_str))
+                    }
                 }
             }
             Err(e) => QueryResult::Error(EvalError::decode_failure(e.message())),
@@ -23655,6 +23668,20 @@ fn builtin_fromjson<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 /// "this is valid JSON but not a number" (`"null"`) from "this is not valid
 /// JSON at all" (`"0x10"`), which jq words differently.
 fn parse_complete_json(s: &str, yq_mode: bool) -> Result<OwnedValue, String> {
+    // #5312: jq's parser skips one UTF-8 BOM at the front of the text, as it does for its input
+    // stream (#5291); a second one, or one behind whitespace, is still refused. yq's decoder is
+    // a different one and is left as it was.
+    let s = if yq_mode {
+        s
+    } else {
+        s.strip_prefix('\u{feff}').unwrap_or(s)
+    };
+    parse_complete_json_after_bom(s, yq_mode)
+}
+
+/// [`parse_complete_json`] for text whose leading BOM, if jq's parser would skip one, is
+/// already off: `tonumber` strips it itself and must not have its probe strip a second.
+fn parse_complete_json_after_bom(s: &str, yq_mode: bool) -> Result<OwnedValue, String> {
     let bytes = s.as_bytes();
     if !yq_mode {
         // #3032: use the same jq accept-set and literal-preserving decoder as
