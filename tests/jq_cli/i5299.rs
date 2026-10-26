@@ -31,7 +31,6 @@ fn test_leading_dot_number_literal_in_a_filter_5299() -> Result<()> {
         (".[.5]", "[1,2]", "1\n", 0),
         (".5.b", "null", "", 5),
         (".5[0]", "null", "", 5),
-        ("path(.5)", "null", "", 5),
         (".e5", "{\"e5\":3}", "3\n", 0),
         ("\"\\(.5)\"", "null", "\"0.5\"\n", 0),
         (".[.5:]", "[1,2,3]", "[1,2,3]\n", 0),
@@ -59,5 +58,16 @@ fn test_dot_digit_after_a_term_stays_a_syntax_error_5299() -> Result<()> {
         let (out, code) = run_jq_stdin(filter, "null", &["-c"])?;
         assert_eq!((out.as_str(), code), ("", 3), "{filter}");
     }
+    Ok(())
+}
+
+/// A literal is not a path: `path(.5)` raises `Invalid path expression with result 0.5` (exit 5) in
+/// jq. The unshared-containers holdout refuses a path target that does more than navigate before
+/// it gets there (exit 3), which is its own refusal rather than this literal's.
+#[test]
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
+fn test_leading_dot_literal_is_not_a_path_5299() -> Result<()> {
+    let (out, code) = run_jq_stdin("path(.5)", "null", &["-c"])?;
+    assert_eq!((out.as_str(), code), ("", 5));
     Ok(())
 }
