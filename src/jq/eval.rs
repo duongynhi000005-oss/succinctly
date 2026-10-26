@@ -15284,8 +15284,14 @@ pub(super) fn arith_mul<S: EvalSemantics>(
                         if result.try_reserve_exact(len).is_err() {
                             return Err(cannot_repeat_string(total));
                         }
-                        for _ in 0..n {
-                            result.push_str(&s);
+                        // #5361: an empty string repeated any number of times is empty, and
+                        // `total` is 0 for it whatever `n` is, so neither guard above fires:
+                        // pushing nothing `n` times never finishes for a count near `i64::MAX`.
+                        // jq loops its (`INT_MAX`-capped) count and answers `""` too.
+                        if !s.is_empty() {
+                            for _ in 0..n {
+                                result.push_str(&s);
+                            }
                         }
                         Ok(OwnedValue::String(result.into()))
                     }

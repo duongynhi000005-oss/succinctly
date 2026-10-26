@@ -102,4 +102,5 @@ mod i5299;
 mod i5302;
 mod i5309;
 mod i5356;
+mod i5361;
 mod i865;
