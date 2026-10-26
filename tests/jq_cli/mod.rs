@@ -142,6 +142,7 @@ mod i5279;
 mod i5285;
 mod i5288;
 mod i5293;
+mod i5294;
 mod i5297;
 mod i5299;
 mod i5300;
