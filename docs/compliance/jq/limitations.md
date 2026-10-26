@@ -524,6 +524,7 @@ A shorthand whose string is not surely one value is therefore refused at compile
 "Surely one value" is a syntactic check: fields, indices, literals, variables, formats, arithmetic and comparison of those, `tostring`/`length`/`type` and the case and rounding builtins, and array constructions.
 A call to anything else, an iteration, a comma or `empty` is refused, though some of them yield one value.
 A key with an explicit value (`{"a\(1,2)": 3}`) has no such limit and fans out as jq does.
+The exact pairing is tracked in [#5323](https://github.com/rust-works/succinctly/issues/5323).
 
 ## Dynamic path targets run on the path-mode interpreter (#5223)
 
