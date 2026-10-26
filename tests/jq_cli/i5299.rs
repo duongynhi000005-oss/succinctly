@@ -33,6 +33,15 @@ fn test_leading_dot_number_literal_in_a_filter_5299() -> Result<()> {
         (".5[0]", "null", "", 5),
         ("path(.5)", "null", "", 5),
         (".e5", "{\"e5\":3}", "3\n", 0),
+        ("\"\\(.5)\"", "null", "\"0.5\"\n", 0),
+        (".[.5:]", "[1,2,3]", "[1,2,3]\n", 0),
+        (".[:1.5]", "[1,2,3]", "[1,2]\n", 0),
+        ("[limit(.5; 1,2)]", "null", "[1]\n", 0),
+        ("reduce range(3) as $i (.5; . + .5)", "null", "2\n", 0),
+        (".[.5]", "[1,2,3]", "1\n", 0),
+        ("@base64 \"x\\(.5)\"", "null", "\"xMC41\"\n", 0),
+        (".5 | -.", "null", "-0.5\n", 0),
+        ("if .5 then 1 else 2 end", "null", "1\n", 0),
     ] {
         let (out, code) = run_jq_stdin(filter, input, &["-c"])?;
         assert_eq!(
