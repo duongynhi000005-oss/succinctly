@@ -29,6 +29,7 @@ fn run_limited(program: &str) -> Result<(String, i32)> {
         }
         if start.elapsed() > Duration::from_secs(30) {
             child.kill()?;
+            child.wait()?;
             bail!("{program}: still running after 30 s");
         }
         std::thread::sleep(Duration::from_millis(20));
