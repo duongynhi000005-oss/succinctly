@@ -12787,8 +12787,10 @@ Programs whose modules are only top-level, or only dependencies, are unchanged.
 `modulemeta` resolves its input like an `import` does, on the library directories alone, and answers the header metadata, then `deps` and `defs`.
 The current directory is not searched, as in jq: a `cw.jq` beside the invocation is `module not found: cw`.
 A module that is found but fails to load prints its diagnostic to stderr and answers `null` with exit 0, as jq does.
-Two things differ, both in the parts of a module that succinctly's parser reads more narrowly than jq's.
+Four things differ, all in the parts of a module that succinctly's parser reads more narrowly than jq's.
 A metadata value is a literal here (string, number, boolean, `null`, array, object), where jq takes any constant expression, so `module {a:(1+2)};` is a parse error here and `{"a":3,...}` in jq.
+A metadata number is read as a double, so `-0` prints `0` and a literal such as `100000000000000000001` prints rounded, where jq 1.7.1 keeps the literal.
+A module whose last item is a lone `.` (`def f: 1; .`) is accepted, where jq reports `library should only have function definitions, not a main expression`, because the parser reads it as an empty body.
 The wording of the parse error, and of `Module metadata must be an object`, is succinctly's own, the same fidelity limit as a module's syntax error above.
 Both are tracked in [#5344](https://github.com/rust-works/succinctly/issues/5344).
 

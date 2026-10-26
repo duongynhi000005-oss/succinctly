@@ -9677,6 +9677,11 @@ impl<'a> Parser<'a> {
                     if self.peek() == Some(',') {
                         self.next();
                         self.skip_ws();
+                    } else if self.peek() != Some(']') {
+                        return Err(ParseError::new(
+                            "expected ',' or ']' in metadata array",
+                            self.pos,
+                        ));
                     }
                 }
                 self.next(); // consume ']'

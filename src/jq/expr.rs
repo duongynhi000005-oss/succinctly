@@ -3,7 +3,6 @@
 #[cfg(not(test))]
 use alloc::boxed::Box;
 #[cfg(not(test))]
-#[cfg(not(test))]
 use alloc::rc::Rc;
 #[cfg(not(test))]
 use alloc::string::String;

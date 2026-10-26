@@ -138,6 +138,15 @@ fn test_modulemeta_load_failure_prints_and_answers_null_5321() -> Result<()> {
         )
     );
 
+    // A metadata array whose elements are not separated by commas is a parse error, not `[1,2]`.
+    std::fs::write(
+        dir.path().join("lib/loose.jq"),
+        "module {a:[1 2]};\ndef z: 1;\n",
+    )?;
+    let (stdout, stderr, code) = modulemeta(dir.path(), "loose", "modulemeta")?;
+    assert_eq!((stdout.as_str(), code), ("null\n", 0), "{stderr}");
+    assert!(stderr.starts_with("jq: error: "), "{stderr}");
+
     std::fs::write(dir.path().join("lib/syn.jq"), "def (")?;
     let (stdout, stderr, code) = modulemeta(dir.path(), "syn", "modulemeta")?;
     assert_eq!((stdout.as_str(), code), ("null\n", 0), "{stderr}");

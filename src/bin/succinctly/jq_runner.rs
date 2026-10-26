@@ -182,8 +182,11 @@ const AUTO_LOAD_RUN_ID: u32 = 0;
 /// Module loader for resolving and loading jq modules.
 #[derive(Debug)]
 pub struct ModuleLoader {
-    /// Search path for modules (in order of priority)
+    /// Search path for modules (in order of priority): the current directory (#5327), then
+    /// [`Self::lib_dirs`]
     search_path: Vec<PathBuf>,
+    /// The library directories alone, which `modulemeta` searches (#5321)
+    lib_dirs: Vec<PathBuf>,
     /// Loaded modules, keyed by [`Self::run_key`] -- the same canonical-file
     /// key [`Self::run_ids`]/[`Self::run_origins`] intern by, not the literal
     /// path a caller happened to write (function definitions: name, params,
@@ -1304,23 +1307,13 @@ impl FailureWalk<'_> {
 impl ModuleLoader {
     /// Create a new module loader with the given search paths.
     pub fn new(library_paths: &[PathBuf]) -> Self {
-        let mut search_path = Vec::new();
+        let mut lib_dirs = Vec::new();
         let mut auto_loaded_defs = Vec::new();
 
-        // #5327: jq 1.7.1 prepends the current directory to the list of every
-        // `import`/`include` that carries no `search` metadata, ahead of the
-        // `-L` directories -- for the main program, for a module's own nested
-        // imports alike (a nested import is *not* resolved against the
-        // importing module's directory: with `k.jq` in both the current
-        // directory and next to the module, the current directory's wins).
-        // `get_search_list` reports the `-L` list alone, so this does
-        // not belong in the CLI facts it reads.
-        search_path.push(PathBuf::from("."));
-
-        // Add command-line -L paths next
+        // Add command-line -L paths first
         for path in library_paths {
             if path.is_dir() {
-                search_path.push(path.clone());
+                lib_dirs.push(path.clone());
             }
         }
 
@@ -1329,7 +1322,7 @@ impl ModuleLoader {
             for path_str in jq_lib_path.split(':') {
                 let path = PathBuf::from(path_str);
                 if path.is_dir() {
-                    search_path.push(path);
+                    lib_dirs.push(path);
                 }
             }
         }
@@ -1357,12 +1350,24 @@ impl ModuleLoader {
                 }
             } else if jq_path.is_dir() {
                 // Add ~/.jq directory to search path
-                search_path.push(jq_path);
+                lib_dirs.push(jq_path);
             }
         }
 
+        // #5327: jq 1.7.1 prepends the current directory to the list of every
+        // `import`/`include` that carries no `search` metadata, ahead of the
+        // `-L` directories -- for the main program and for a module's own nested
+        // imports alike (a nested import is *not* resolved against the
+        // importing module's directory: with `k.jq` in both the current
+        // directory and next to the module, the current directory's wins).
+        // `get_search_list` reports the `-L` list alone, so this does
+        // not belong in the CLI facts it reads.
+        let mut search_path = vec![PathBuf::from(".")];
+        search_path.extend(lib_dirs.iter().cloned());
+
         Self {
             search_path,
+            lib_dirs,
             loaded_modules: BTreeMap::new(),
             reachable_calls: BTreeMap::new(),
             auto_loaded_defs,
@@ -1379,7 +1384,7 @@ impl ModuleLoader {
     /// without the current directory [`Self::new`] puts first (#5327). `modulemeta` searches
     /// these and not the current directory (#5321).
     fn lib_dirs(&self) -> &[PathBuf] {
-        &self.search_path[1..]
+        &self.lib_dirs
     }
 
     /// The run id for `module_path`, interned by canonical file so the same
