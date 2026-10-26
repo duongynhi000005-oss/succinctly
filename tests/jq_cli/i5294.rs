@@ -140,3 +140,39 @@ fn test_directory_module_through_the_multi_module_helper_5294() -> Result<()> {
     assert_eq!((stdout.as_str(), code), ("\"m/m\"\n", 0), "{stderr}");
     Ok(())
 }
+
+/// A directory module's own imports resolve through the search path, not its directory: `c.jq`
+/// beside `b/b.jq` is not found for `import "c"` there, while `c.jq` at the root of the search
+/// directory is. A trailing slash names no module.
+#[test]
+fn test_directory_module_imports_resolve_through_the_search_path_5294() -> Result<()> {
+    let nested = "import \"c\" as c; def a: c::z;";
+    for (files, filter, want, want_code) in [
+        (
+            &[("b/b.jq", nested), ("c.jq", "def z: \"root c\";")][..],
+            "import \"b\" as b; b::a",
+            "\"root c\"\n",
+            0,
+        ),
+        (
+            &[("b/b.jq", nested), ("b/c.jq", "def z: \"sibling c\";")][..],
+            "import \"b\" as b; b::a",
+            "",
+            3,
+        ),
+        (
+            &[("b/b.jq", "def a: 1;")][..],
+            "import \"b/\" as b; b::a",
+            "",
+            3,
+        ),
+    ] {
+        let (out, code) = run_over(&[files], filter)?;
+        assert_eq!(
+            (out.as_str(), code),
+            (want, want_code),
+            "{filter} over {files:?}"
+        );
+    }
+    Ok(())
+}
