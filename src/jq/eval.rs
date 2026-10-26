@@ -19475,9 +19475,11 @@ fn yq_join_separator(sep: OwnedValue) -> String {
     }
     match sep {
         OwnedValue::String(s) => s.into_string(),
-        // Empty-object special case (#1047): see `yq_join_element_part`'s
-        // identical arm above -- confirmed live, `[1,2] | join({})` is
-        // `"1{}2"` in real yq, not `"12"`.
+        // Empty-object special case (#1047): confirmed live, `[1,2] | join({})`
+        // is `"1{}2"` in real yq, not `"12"`. That is the expression's own `{}`;
+        // an element that is a document `{}` is `""` (#1791), and a separator
+        // that came from the document through `$x` is too -- an owned value
+        // carries no origin to tell them apart (docs/compliance/yq/limitations.md).
         OwnedValue::Object(ref m) if m.is_empty() => "{}".to_string(),
         OwnedValue::Array(_) | OwnedValue::Object(_) => String::new(),
         // `to_json_yq()` (#1030 code review): same reasoning as
@@ -19627,27 +19629,16 @@ fn collect_join_parts<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                 // contents (see `yq_join_element_part`'s doc comment), so
                 // deep-copying it first would be pure waste (#1044 review).
                 //
-                // The empty-object special case (#1047) is checked on the
-                // live cursor *before* that collapse: `JsonFields::is_empty`
-                // is an O(1) cursor check, and `to_owned_key_shape` produces
-                // an empty `IndexMap` for *any* object in yq mode (this
-                // join's only mode; jq mode keeps a descriptor's `start`/
-                // `end`, #3300) regardless of its real field count, so
-                // checking emptiness after the
-                // collapse can't distinguish "genuinely empty" from
-                // "collapsed, contents unread" (a non-empty object would
-                // wrongly render as `{}` too).
-                //
-                // Re-verified live during #1535 (unrelated hoist): real yq
-                // v4.53.3's actual answer for `[{}] | join(",")` is `""`,
-                // not `"{}"` -- this special case may be wrong, or #1047's
-                // own original check may have covered a different shape.
-                // Not investigated further here; tracked as #1791.
+                // That includes an empty object (#1791): a `{}` that is a
+                // *document* node is `""` in yq v4.53.3 (`- {}` / `- x` joins as
+                // `,x`, and so does one reached through `$x`, `[.[0]]` or `del`).
+                // The text `{}` is only what yq writes for an empty object the
+                // *expression* spelled `{}` (`[{}] | join(",")`, #1047), which this
+                // route cannot tell from a document one -- a constructed array
+                // reaches here like a document array -- so it follows the
+                // document, the common case (docs/compliance/yq/limitations.md).
                 let parts: Result<Vec<String>, EvalError> = elements
-                    .map(|e| match &e {
-                        StandardJson::Object(fields) if fields.is_empty() => Ok("{}".to_string()),
-                        _ => to_owned_key_shape::<_, S>(&e).map(yq_join_element_part),
-                    })
+                    .map(|e| to_owned_key_shape::<_, S>(&e).map(yq_join_element_part))
                     .collect();
                 parts.map(JoinParts::Yq)
             }

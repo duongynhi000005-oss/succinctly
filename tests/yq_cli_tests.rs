@@ -29069,21 +29069,18 @@ fn test_yq_join_null_separator_renders_as_literal_text_1041() -> Result<()> {
     Ok(())
 }
 
-/// #1047: an *empty* object is its own case, unlike a non-empty object or
-/// any array (empty or not), which all become the empty string (per
+/// #1047: an empty object *separator* is its own case, unlike a non-empty
+/// object or any array (empty or not), which all become the empty string (per
 /// `test_yq_join_non_scalar_element_becomes_empty_part_1041` above) -- real
-/// yq renders it as literal `{}` text, both as an element and as a
-/// separator. Regression-guards the specific bug this issue's own fix had
-/// to route around: `to_owned_key_shape` (the element materializer `join`
-/// uses to avoid deep-copying a container it's about to discard) always
-/// produces an *empty* map for any object regardless of its real field
-/// count, so the emptiness check must happen on the live cursor before that
-/// collapse, not after it -- `{"a":1}` must NOT render as `{}`.
+/// yq renders it as literal `{}` text. A document `{}` *element* is not one:
+/// it is the empty string (#1791, `tests/yq_cli/i1791.rs`), and this test used to
+/// pin `{},x` for it from a mis-read of the oracle. `{"a":1}` must stay empty
+/// as an element either way.
 #[test]
 fn test_yq_join_empty_object_renders_as_literal_text_1047() -> Result<()> {
     let (stdout, code) = run_yq_stdin(r#"join(",")"#, "- {}\n- x\n", &["-r"])?;
     assert_eq!(code, 0);
-    assert_eq!(stdout.trim_end(), "{},x");
+    assert_eq!(stdout.trim_end(), ",x");
 
     let (stdout, code) = run_yq_stdin(r#"join(",")"#, "- x: 1\n- a\n", &["-r"])?;
     assert_eq!(code, 0);

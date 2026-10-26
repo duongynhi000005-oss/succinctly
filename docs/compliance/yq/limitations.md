@@ -5973,6 +5973,16 @@ output is unaffected, since neither appears in JSON
 for the feature-level gaps (position builtins after DOM conversion; `file_index`/`key`/
 `document_index` inside object literals or `any`/`all`).
 
+### An empty mapping in `join` is `{}` only when the expression spelled `{}` ([#1791](https://github.com/rust-works/succinctly/issues/1791), [#1047](https://github.com/rust-works/succinctly/issues/1047))
+
+`join` writes a mapping element or separator as the empty string, except an empty one that is the expression's own `{}` literal, which it writes as the text `{}`.
+`[{}] | join(",")` is `{}` and `[1,2] | join({})` is `1{}2`, while a `{}` node of the document is `""`: `- {}` / `- x` joins as `,x`, and so does the same node reached through `$x`, `[.[0]]` or `del` (`[{"a":1} | del(.a)] | join(",")` is `""` too).
+Captured from yq v4.53.3.
+An element that is a document `{}` is `""` here too since #1791 (it was `{}`, from a mis-read oracle in #1047).
+Not matched: an array reaches `join` the same way whether the document or the expression made it, and a value carries no origin, so the literal `{}` *element* (`[{}] | join(",")`, `[{}, 1] | join("-")`) is `""` here and `{}` in yq.
+It follows the document case because that is the one real inputs hit.
+The separator is an evaluated expression: `join({})` is `1{}2` as in yq, and a `{}` separator that came from the document through `$s` is `1{}2` here for the same missing-origin reason (`. as $s | [1,2] | join($s)` over `{}` is `12` in yq).
+
 ## `tostring` of a container is YAML since #1130; `tojson` still renders compactly ([#2902](https://github.com/rust-works/succinctly/issues/2902), [#1130](https://github.com/rust-works/succinctly/issues/1130))
 
 Real yq's `tostring` on a container is its YAML encoder (block style, `!!float` tags
