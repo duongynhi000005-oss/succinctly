@@ -15871,7 +15871,7 @@ fn each_recurse_cursor_generic<S: EvalSemantics, V: DocumentValue>(
             &PathNode::At(cursor),
             &NoTrail,
             true,
-            &mut |_, child| {
+            &mut |_, child, _| {
                 match child {
                     PathNode::At(c) => pending.push(c),
                     PathNode::Absent | PathNode::Owned(_) => unreachable!("live children only"), // patchcov: coverage tolerate-line reason="unreachable: a step from a live node emits only live children (#3023)"
@@ -25233,6 +25233,16 @@ fn path_node_type_name<V: DocumentValue>(node: &PathNode<V>) -> &'static str {
     }
 }
 
+/// The key node of a mapping member and its decoded value, offered to a step's `emit` callback
+/// beside the position it reaches (#2789): an iteration holds them already, and `.[] | key` emits
+/// them as they are rather than hopping back to the key from the value and decoding it again.
+/// `None` for every step that does not come out of a mapping's iteration.
+type MemberKey<'k, V> = Option<(<V as DocumentValue>::Cursor, &'k V)>;
+
+/// The callback a navigation step delivers each position it reaches to: the trail and node, and the
+/// [`MemberKey`] when the step is a mapping's iteration. `Stop` ends the step.
+type StepEmit<'e, V, T> = &'e mut dyn for<'k> FnMut(T, PathNode<V>, MemberKey<'k, V>) -> Demand;
+
 /// The trail one navigation step extends (#2572): `path()`'s own
 /// [`PathTrail`], the path-context walk's [`PathContextTrail`], or [`NoTrail`]
 /// for the one walk that reads neither (#3023).
@@ -25930,7 +25940,7 @@ fn path_iterate_step_generic<S: EvalSemantics, V: DocumentValue, T: StepTrail<V>
     node: &PathNode<V>,
     path: &T,
     collapse_duplicate_keys: bool,
-    emit: &mut dyn FnMut(T, PathNode<V>) -> Demand,
+    emit: StepEmit<'_, V, T>,
 ) -> Result<Demand, EvalError> {
     guard_path_walk_depth(path.recursion_depth())?;
     match node {
@@ -25980,6 +25990,7 @@ fn path_iterate_step_generic<S: EvalSemantics, V: DocumentValue, T: StepTrail<V>
                                 node,
                             ),
                             PathNode::At(field.value_cursor),
+                            Some((field.key_cursor, &field.key)),
                         ),
                         Demand::Stop
                     ) {
@@ -26003,6 +26014,7 @@ fn path_iterate_step_generic<S: EvalSemantics, V: DocumentValue, T: StepTrail<V>
                         emit(
                             path.extend_from(OwnedValue::Int(i as i64), node),
                             PathNode::At(ec),
+                            None,
                         ),
                         Demand::Stop
                     ) {
@@ -26089,7 +26101,7 @@ fn path_step_each_generic<S: EvalSemantics, V: DocumentValue, T: StepTrail<V>>(
     node: &PathNode<V>,
     path: &T,
     collapse_duplicate_keys: bool,
-    emit: &mut dyn FnMut(T, PathNode<V>) -> Demand,
+    emit: StepEmit<'_, V, T>,
 ) -> Result<Demand, EvalError> {
     // An owned node has no cursor to navigate, so it keeps its own walk;
     // that one is bounded by the owned value already in memory, and
@@ -26098,7 +26110,7 @@ fn path_step_each_generic<S: EvalSemantics, V: DocumentValue, T: StepTrail<V>>(
         let mut out = Vec::new();
         path_step_owned::<S, V, T>(expr, node, v, path, &mut out)?;
         for (trail, child) in out {
-            if matches!(emit(trail, child), Demand::Stop) {
+            if matches!(emit(trail, child, None), Demand::Stop) {
                 return Ok(Demand::Stop);
             }
         }
@@ -26106,12 +26118,12 @@ fn path_step_each_generic<S: EvalSemantics, V: DocumentValue, T: StepTrail<V>>(
     }
     match expr {
         Expr::Field(name) => match path_field_step_generic::<S, V, T>(name, node, path)? {
-            Some((trail, child)) => Ok(emit(trail, child)),
+            Some((trail, child)) => Ok(emit(trail, child, None)),
             None => Ok(Demand::Continue),
         },
         Expr::Index { idx, key } => {
             match path_index_step_generic::<S, V, T>(*idx, key.as_ref(), node, path)? {
-                Some((trail, child)) => Ok(emit(trail, child)),
+                Some((trail, child)) => Ok(emit(trail, child, None)),
                 None => Ok(Demand::Continue),
             }
         }
@@ -26177,7 +26189,7 @@ fn path_step_generic<S: EvalSemantics, V: DocumentValue, T: StepTrail<V>>(
             node,
             path,
             collapse_duplicate_keys,
-            &mut |trail, child| {
+            &mut |trail, child, _| {
                 out.push((trail, child));
                 Demand::Continue
             },
@@ -27033,7 +27045,7 @@ fn path_context_step_generic<S: EvalSemantics, V: DocumentValue>(
                 &pos.node,
                 &pos.trail,
                 true,
-                &mut |trail, node| {
+                &mut |trail, node, _| {
                     debug_assert_eq!(
                         trail.depth(),
                         depth + 1,
@@ -28662,6 +28674,7 @@ fn path_component_step_expr(component: &OwnedValue) -> Option<Expr> {
 fn path_context_emitting_value<S: EvalSemantics, V: DocumentValue>(
     expr: &Expr,
     pos: &PathContextPos<V>,
+    member_key: MemberKey<'_, V>,
 ) -> Result<Option<GenericItem<V>>, EvalError> {
     let owned = |v: OwnedValue| Some(GenericItem::Owned(v));
     match expr {
@@ -28678,15 +28691,19 @@ fn path_context_emitting_value<S: EvalSemantics, V: DocumentValue>(
                 PathNode::At(c) => {
                     let in_mapping = pos.trail.links().next().is_some_and(|step| step.member);
                     let member_key = if in_mapping {
-                        c.prev_sibling().and_then(|kc| {
-                            let v = kc.value();
-                            let display = key_display_string(&v)?.into_owned();
-                            Some(if key_node_spells(&kc, &v, &display) {
-                                GenericItem::OneCursorValue(kc, v)
-                            } else {
-                                GenericItem::Owned(OwnedValue::String(display.into()))
+                        // The key node the iteration handed over, else the value's previous
+                        // sibling (#2789).
+                        member_key
+                            .map(|(kc, v)| (kc, v.clone()))
+                            .or_else(|| c.prev_sibling().map(|kc| (kc, kc.value())))
+                            .and_then(|(kc, v)| {
+                                let display = key_display_string(&v)?.into_owned();
+                                Some(if key_node_spells(&kc, &v, &display) {
+                                    GenericItem::OneCursorValue(kc, v)
+                                } else {
+                                    GenericItem::Owned(OwnedValue::String(display.into()))
+                                })
                             })
-                        })
                     } else {
                         None
                     };
@@ -28709,9 +28726,25 @@ fn path_context_emitting_value<S: EvalSemantics, V: DocumentValue>(
                 // lookups `to_owned_cursor` makes -- half of what this
                 // emission originally added on `[.[] | key]`, where the node
                 // is materialized straight back into the string it came from.
-                PathNode::At(c) => match member_key_node(c, key) {
-                    Some((kc, v)) => GenericItem::OneCursorValue(kc, v),
-                    None => GenericItem::Owned(OwnedValue::String(key.clone())),
+                PathNode::At(c) => match member_key {
+                    // #2789: `.[] | key` holds the key node from the iteration, so there is no
+                    // hop to make; the spelling check is the one `member_key_node` makes of
+                    // the node it hops to.
+                    Some((kc, v)) => {
+                        debug_assert!(
+                            c.prev_sibling().is_some_and(|prev| prev.same_node(&kc)),
+                            "a recorded key node is the value's previous sibling"
+                        );
+                        if key_node_spells(&kc, v, key) {
+                            GenericItem::OneCursorValue(kc, v.clone())
+                        } else {
+                            GenericItem::Owned(OwnedValue::String(key.clone()))
+                        }
+                    }
+                    None => match member_key_node(c, key) {
+                        Some((kc, v)) => GenericItem::OneCursorValue(kc, v),
+                        None => GenericItem::Owned(OwnedValue::String(key.clone())),
+                    },
                 },
                 PathNode::Absent | PathNode::Owned(_) => {
                     GenericItem::Owned(OwnedValue::String(key.clone()))
@@ -28788,15 +28821,13 @@ fn path_context_step_each<S: EvalSemantics, V: DocumentValue>(
     // the query, so none of these can be the computed component yq rolls a
     // step back for; that is what makes them safe to deliver as they are
     // found. An owned node keeps the collecting route below.
-    if matches!(expr, Expr::Field(_) | Expr::Index { .. } | Expr::Iterate)
-        && !matches!(pos.node, PathNode::Owned(_))
-    {
+    if is_literal_navigation(expr, pos) {
         return path_step_each_generic::<S, V, _>(
             expr,
             &pos.node,
             &pos.trail,
             true,
-            &mut |trail, node| {
+            &mut |trail, node, _| {
                 sink(PathContextPos {
                     node,
                     trail,
@@ -28933,7 +28964,7 @@ fn path_context_walk_generic<S: EvalSemantics, V: DocumentValue>(
         // sibling hop, still constant) so the metadata builtins after it
         // answer from the key -- see `path_context_emitting_value`.
         Expr::Builtin(Builtin::PathNoArg | Builtin::Key) => {
-            match path_context_emitting_value::<S, V>(expr, pos) {
+            match path_context_emitting_value::<S, V>(expr, pos, None) {
                 Ok(Some(item)) => Ok(sink.push(item)),
                 Ok(None) => Ok(Demand::Continue),
                 // `cursor_key`'s malformed-member-key error path, pre-existing
@@ -28947,6 +28978,73 @@ fn path_context_walk_generic<S: EvalSemantics, V: DocumentValue>(
     }
 }
 
+/// Whether `first | key` is a mapping's iteration followed by `key` at a position
+/// [`path_context_iterate_key`] steps the way [`path_context_step_each`] does: a literal `.[]`
+/// from a node that is not an owned value.
+fn is_iterate_then_key<V: DocumentValue>(
+    first: &Expr,
+    key: &Expr,
+    pos: &PathContextPos<V>,
+) -> bool {
+    let first = unwrap_paren(first);
+    matches!(first, Expr::Iterate)
+        && matches!(unwrap_paren(key), Expr::Builtin(Builtin::Key))
+        && is_literal_navigation(first, pos)
+}
+
+/// Whether `expr` is a literal navigation step (`.k`, `.[3]`, `.[]`) from a position that is not an
+/// owned value: the steps [`path_context_step_each`] delivers as they are found, which
+/// [`is_iterate_then_key`] must agree with for the fused walk to be the same walk.
+fn is_literal_navigation<V: DocumentValue>(expr: &Expr, pos: &PathContextPos<V>) -> bool {
+    matches!(expr, Expr::Field(_) | Expr::Index { .. } | Expr::Iterate)
+        && !matches!(pos.node, PathNode::Owned(_))
+}
+
+/// `.[] | key` from `pos` (#2789): each child's `key` is emitted from the key node the iteration
+/// holds, instead of the sibling hop and second decode [`path_context_emitting_value`] otherwise
+/// makes from the value's cursor. The same steps and the same emission as the two-stage walk
+/// ([`path_context_step_each`] then [`path_context_walk_pipe`] on `[key]`), only with the key
+/// handed over rather than recovered; an error `key` raises stops the iteration and outranks
+/// whatever the iteration itself reports, as a downstream error does there.
+fn path_context_iterate_key<S: EvalSemantics, V: DocumentValue>(
+    pos: &PathContextPos<V>,
+    sink: &mut dyn Sink<V>,
+) -> Result<Demand, Control> {
+    let key = Expr::Builtin(Builtin::Key);
+    let mut failure = None;
+    let stepped = path_step_each_generic::<S, V, _>(
+        &Expr::Iterate,
+        &pos.node,
+        &pos.trail,
+        true,
+        &mut |trail, node, member_key| {
+            let head = PathContextPos {
+                node,
+                trail,
+                at_key: false,
+            };
+            match path_context_emitting_value::<S, V>(&key, &head, member_key) {
+                Ok(Some(item)) => sink.push(item),
+                Ok(None) => Demand::Continue, // patchcov: coverage tolerate-line reason="unreachable: key emits nothing only at a key node (an iteration's child is not one) and at the document root, which no iteration reaches (#2789)"
+                Err(error) => stash_iterate_key_error(&mut failure, error),
+            }
+        },
+    );
+    match failure {
+        Some(error) => Err(Control::Error(error)), // patchcov: coverage tolerate-line reason="unreachable: nothing above sets the failure (#2789)"
+        None => stepped.map_err(Control::Error),
+    }
+}
+
+/// The error [`path_context_iterate_key`] stops on, as the two-stage walk keeps it: the plain
+/// [`Control::Error`] a downstream error is, with no `?//` retry marking (that is
+/// [`stop_with_error`]'s, for a failure `path_context_walk_generic` raises itself).
+#[cold]
+fn stash_iterate_key_error(slot: &mut Option<EvalError>, error: EvalError) -> Demand {
+    *slot = Some(error); // patchcov: coverage tolerate-line reason="unreachable: key errors only through cursor_key, which only a negative integer component reaches, and the handed-over key node answers an iteration's negative `-3:` key before that; a malformed key is refused by effective_fields_checked before the iteration emits it (#2789)"
+    Demand::Stop // patchcov: coverage tolerate-line reason="unreachable: same as the line above (#2789)"
+} // patchcov: coverage tolerate-line reason="unreachable: same as the line above (#2789)"
+
 /// Walk a pipe's stages from `pos`: every stage but the last moves the
 /// position, the last one emits. An empty pipe emits the position itself.
 fn path_context_walk_pipe<S: EvalSemantics, V: DocumentValue>(
@@ -28957,6 +29055,10 @@ fn path_context_walk_pipe<S: EvalSemantics, V: DocumentValue>(
     match exprs.split_first() {
         None => Ok(sink.push(path_context_emit_node(&pos.node))),
         Some((first, [])) => path_context_walk_generic::<S, V>(first, pos, sink),
+        // #2789: `.[] | key` -- the iteration already holds each member's key node.
+        Some((first, [key])) if is_iterate_then_key(first, key, pos) => {
+            path_context_iterate_key::<S, V>(pos, sink)
+        }
         Some((first, rest)) => {
             let mut downstream_error = None;
             let stepped =
@@ -54783,7 +54885,7 @@ mod tests {
                 &node,
                 &trail,
                 true,
-                &mut |t, n| {
+                &mut |t, n, _| {
                     emitted.push(snapshot(t, n));
                     if stop {
                         Demand::Stop
@@ -54834,6 +54936,107 @@ mod tests {
         }
     }
 
+    /// #2789: `.[] | key` is walked by [`path_context_iterate_key`], which hands the key node the
+    /// iteration holds to `key` instead of the sibling hop; it must emit exactly what the two-stage
+    /// walk (the iteration, then `key` at each child) emits -- the same key nodes, or the same owned
+    /// spelling where the node does not spell the key -- for every mapping and sequence shape, in
+    /// both modes and both formats, and stop where a consumer stops it.
+    #[test]
+    fn iterate_then_key_walk_matches_the_two_stage_walk_2789() {
+        use crate::json::JsonIndex;
+        use crate::yaml::YamlIndex;
+
+        /// (items, whether the walk reported a stop) of the fused and the two-stage walk from
+        /// `root`, whose sink stops after `stop_after` items.
+        fn both_walks<S: EvalSemantics, V: DocumentValue>(
+            root: V::Cursor,
+            stop_after: usize,
+        ) -> ((Vec<String>, bool), (Vec<String>, bool)) {
+            let key = Expr::Builtin(Builtin::Key);
+            let describe = |item: GenericItem<V>| match item {
+                GenericItem::OneCursorValue(kc, _) => format!("node {}", kc.node_id()),
+                other => format!("owned {:?}", path_context_item_to_owned::<_, S>(other)),
+            };
+            let pos = path_context_root_for::<S, V>(root).unwrap();
+
+            let mut fused = Vec::new();
+            let walked =
+                path_context_walk_pipe::<S, V>(&[Expr::Iterate, key.clone()], &pos, &mut |item| {
+                    fused.push(describe(item));
+                    if fused.len() >= stop_after {
+                        Demand::Stop
+                    } else {
+                        Demand::Continue
+                    }
+                });
+            let fused_stopped = matches!(walked, Ok(Demand::Stop));
+            assert!(walked.is_ok());
+
+            let mut two_stage = Vec::new();
+            let stepped = path_context_step_each::<S, V>(&Expr::Iterate, &pos, &mut |head| {
+                let walked = path_context_walk_generic::<S, V>(&key, &head, &mut |item| {
+                    two_stage.push(describe(item));
+                    if two_stage.len() >= stop_after {
+                        Demand::Stop
+                    } else {
+                        Demand::Continue
+                    }
+                });
+                assert!(walked.is_ok());
+                walked.unwrap_or(Demand::Stop)
+            });
+            let two_stage_stopped = matches!(stepped, Ok(Demand::Stop));
+            assert!(stepped.is_ok());
+            ((fused, fused_stopped), (two_stage, two_stage_stopped))
+        }
+
+        let yaml_docs = [
+            "a: 1\nb: 2\n",
+            "a: 1\na: 2\nb: 3\n",
+            "base: &b\n  p: 1\n  q: 2\nuse:\n  <<: *b\n  r: 3\n",
+            "1: x\ntrue: y\nnull: z\n\"2\": w\n!!str 3: v\n",
+            "-3: x\n0x1f: y\n1: z\n007: q\n",
+            "&k a: 1\n? b\n: 2\n'c': 3\n",
+            "? |\n  block\n: 1\nplain key: 2\n[a, b]: 3\n",
+            "- a: 1\n- b\n- [c]\n",
+            "{a: 1, b: {c: 2}}\n",
+            "# top\na: 1 # one\n\n# before b\nb: 2\n",
+            "x: []\ny: {}\n",
+        ];
+        for yaml in yaml_docs {
+            let bytes = yaml.as_bytes();
+            let index = YamlIndex::build(bytes).unwrap();
+            let top = index.root(bytes).first_child().expect("a document");
+            for stop_after in [usize::MAX, 1, 2] {
+                let (fused, two_stage) = both_walks::<
+                    YqSemantics,
+                    crate::yaml::YamlValue<'_, Vec<u64>>,
+                >(top, stop_after);
+                assert_eq!(fused, two_stage, "yq {yaml:?} stop after {stop_after}");
+            }
+        }
+
+        let json_docs = [
+            r#"{"a":1,"b":[1,2],"c":{"d":null}}"#,
+            r#"{"a":1,"a":2,"b":3}"#,
+            "[10,20,30]",
+            r#"{"1":"x","-3":"y","":"z","k\u00e9":"w"}"#,
+            "{}",
+        ];
+        for json in json_docs {
+            let bytes = json.as_bytes();
+            let index = JsonIndex::build(bytes);
+            let root = index.root(bytes);
+            for stop_after in [usize::MAX, 1, 2] {
+                let (fused, two_stage) = both_walks::<
+                    JqSemantics,
+                    crate::json::StandardJson<'_, Vec<u64>>,
+                >(root, stop_after);
+                assert_eq!(fused, two_stage, "jq {json:?} stop after {stop_after}");
+            }
+        }
+    }
+
     #[test]
     fn path_context_nested_seed_hops_and_extends_3022() {
         let json = br#"{"a":{"b":[0,{"c":7}]}}"#;
@@ -54869,8 +55072,12 @@ mod tests {
             ]
         );
         assert!(matches!(
-            path_context_emitting_value::<JqSemantics, _>(&Expr::Builtin(Builtin::Key), &seeded)
-                .unwrap(),
+            path_context_emitting_value::<JqSemantics, _>(
+                &Expr::Builtin(Builtin::Key),
+                &seeded,
+                None
+            )
+            .unwrap(),
             Some(GenericItem::Owned(OwnedValue::Int(1)))
         ));
 
@@ -54931,7 +55138,8 @@ mod tests {
         assert_eq!(key_pos.trail.to_vec(), [OwnedValue::String("a".into())]);
         assert!(path_context_emitting_value::<JqSemantics, _>(
             &Expr::Builtin(Builtin::Key),
-            &key_pos
+            &key_pos,
+            None
         )
         .unwrap()
         .is_none());
