@@ -88,6 +88,30 @@ const FEATURE_GATED: &[&str] = &[
     "neg_infinite_preview",
     "nan_preview",
     "arithmetic_overflow_preview",
+    // #5309: the input-first probes all reach a regex builtin, which fails with "regex feature
+    // not enabled" before any type check when `regex` is compiled out. The two `test` probes
+    // that go through the non-regex fallback (`regex_input_first_test_unpacked_array`,
+    // `regex_bare_refusal_before_input_test_empty_array`) match on both configs.
+    "regex_input_first_match_two_arg",
+    "regex_input_first_test_two_arg",
+    "regex_input_first_capture_two_arg",
+    "regex_input_first_sub_three_arg",
+    "regex_input_first_sub_two_arg",
+    "regex_input_first_gsub_two_arg",
+    "regex_input_first_gsub_three_arg",
+    "regex_input_first_gsub_dots",
+    "regex_input_first_scan_one_arg",
+    "regex_input_first_scan_two_arg",
+    "regex_input_first_scan_dots",
+    "regex_input_first_split_two_arg",
+    "regex_input_first_split_dots",
+    "regex_input_first_splits_one_arg",
+    "regex_input_first_splits_two_arg",
+    "regex_input_first_splits_dots",
+    "regex_input_first_match_null_pattern",
+    "regex_input_first_match_unpacked_array",
+    "regex_input_first_capture_flags_pattern",
+    "regex_bare_refusal_before_input_match",
 ];
 
 struct Probe {

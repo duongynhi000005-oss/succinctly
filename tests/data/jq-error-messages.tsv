@@ -242,3 +242,36 @@ todateiso8601_string	todateiso8601	"x"	strftime/1 requires parsed datetime input
 abs_null	abs	null	null (null) cannot be negated
 abs_false	abs	false	boolean (false) cannot be negated
 abs_true	abs	true	boolean (true) cannot be negated
+regex_input_first_match_two_arg	match(1;2)	null	null (null) cannot be matched, as it is not a string
+regex_input_first_test_two_arg	test(1;2)	1	number (1) cannot be matched, as it is not a string
+regex_input_first_capture_two_arg	capture(1;2)	[1,"a",null]	array ([1,"a",null]) cannot be matched, as it is not a string
+regex_input_first_sub_three_arg	sub(1;2;3)	null	null (null) cannot be matched, as it is not a string
+regex_input_first_sub_two_arg	sub(1;"x")	{"a":1}	object ({"a":1}) cannot be matched, as it is not a string
+regex_input_first_gsub_two_arg	gsub(1;"x")	null	null (null) cannot be matched, as it is not a string
+regex_input_first_gsub_three_arg	gsub(1;"x";"g")	1	number (1) cannot be matched, as it is not a string
+regex_input_first_gsub_dots	gsub(.;.;.)	null	null (null) cannot be matched, as it is not a string
+regex_input_first_scan_one_arg	scan(1)	null	null (null) cannot be matched, as it is not a string
+regex_input_first_scan_two_arg	scan(1;"g")	[[1],2]	array ([[1],2]) cannot be matched, as it is not a string
+regex_input_first_scan_dots	scan(.;.)	null	null (null) cannot be matched, as it is not a string
+regex_input_first_split_two_arg	split(1;"g")	null	null (null) cannot be matched, as it is not a string
+regex_input_first_split_dots	split(.;.)	null	null (null) cannot be matched, as it is not a string
+regex_input_first_splits_one_arg	splits(1)	1	number (1) cannot be matched, as it is not a string
+regex_input_first_splits_two_arg	splits(1;"g")	null	null (null) cannot be matched, as it is not a string
+regex_input_first_splits_dots	splits(.;.)	null	null (null) cannot be matched, as it is not a string
+regex_input_first_match_null_pattern	match(null;"g")	1	number (1) cannot be matched, as it is not a string
+regex_input_first_test_unpacked_array	test(.)	[[1],2]	array ([[1],2]) cannot be matched, as it is not a string
+regex_input_first_match_unpacked_array	match(.)	[1,"a",null]	array ([1,"a",null]) cannot be matched, as it is not a string
+regex_input_first_capture_flags_pattern	capture(1;"g")	null	null (null) cannot be matched, as it is not a string
+regex_bare_refusal_before_input_match	match(1)	null	number not a string or array
+regex_bare_refusal_before_input_test_empty_array	test([])	null	array not a string or array
+nth_null_index	nth(null;1,2,3)	null	nth doesn't support negative indices
+nth_true_index	nth(true;1,2,3)	null	nth doesn't support negative indices
+nth_false_index	nth(false;1,2,3)	null	nth doesn't support negative indices
+nth_string_index	nth("a";"b")	null	string ("a") and number (1) cannot be added
+nth_array_index	nth([];1,2,3)	null	array ([]) and number (1) cannot be added
+nth_object_index	nth({};1,2,3)	null	object ({}) and number (1) cannot be added
+delpaths_bad_entry_value_order	delpaths([1,"a",null])	null	Path must be specified as array, not null
+delpaths_bad_entry_dot	delpaths(.)	[1,"a",null]	Path must be specified as array, not null
+delpaths_bad_entry_after_array	delpaths([[1],"a",true])	[1,2]	Path must be specified as array, not boolean
+delpaths_bad_entry_object_last	delpaths([{},[0],"a"])	[1,2]	Path must be specified as array, not string
+delpaths_bad_entry_only_object	delpaths([{}])	[1,2]	Path must be specified as array, not object
