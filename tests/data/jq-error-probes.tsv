@@ -398,3 +398,46 @@ todateiso8601_string	todateiso8601	"x"
 abs_null	abs	null
 abs_false	abs	false
 abs_true	abs	true
+
+# ── #5309: the regex family reads its INPUT before its pattern and flags ────
+# jq's `_match_impl` is a C function that checks the input first, so a non-string input
+# names the input (`cannot be matched`) even when the pattern or flags are also wrong.
+# The bare `test(re)` form's `not a string or array` is a jq-level def and still wins.
+regex_input_first_match_two_arg	match(1;2)	null
+regex_input_first_test_two_arg	test(1;2)	1
+regex_input_first_capture_two_arg	capture(1;2)	[1,"a",null]
+regex_input_first_sub_three_arg	sub(1;2;3)	null
+regex_input_first_sub_two_arg	sub(1;"x")	{"a":1}
+regex_input_first_gsub_two_arg	gsub(1;"x")	null
+regex_input_first_gsub_three_arg	gsub(1;"x";"g")	1
+regex_input_first_gsub_dots	gsub(.;.;.)	null
+regex_input_first_scan_one_arg	scan(1)	null
+regex_input_first_scan_two_arg	scan(1;"g")	[[1],2]
+regex_input_first_scan_dots	scan(.;.)	null
+regex_input_first_split_two_arg	split(1;"g")	null
+regex_input_first_split_dots	split(.;.)	null
+regex_input_first_splits_one_arg	splits(1)	1
+regex_input_first_splits_two_arg	splits(1;"g")	null
+regex_input_first_splits_dots	splits(.;.)	null
+regex_input_first_match_null_pattern	match(null;"g")	1
+regex_input_first_test_unpacked_array	test(.)	[[1],2]
+regex_input_first_match_unpacked_array	match(.)	[1,"a",null]
+regex_input_first_capture_flags_pattern	capture(1;"g")	null
+# The bare form's own refusals come first, before the call that reads the input.
+regex_bare_refusal_before_input_match	match(1)	null
+regex_bare_refusal_before_input_test_empty_array	test([])	null
+# ── #5309: nth($n; f) is `if $n < 0 then error(...) else last(limit($n + 1; f))` ─
+# null and the booleans sort below every number, so they take the negative-index branch;
+# a string, array or object sorts above, passes the guard, and fails on `$n + 1`.
+nth_null_index	nth(null;1,2,3)	null
+nth_true_index	nth(true;1,2,3)	null
+nth_false_index	nth(false;1,2,3)	null
+nth_string_index	nth("a";"b")	null
+nth_array_index	nth([];1,2,3)	null
+nth_object_index	nth({};1,2,3)	null
+# ── #5309: delpaths names the first non-array in VALUE order, not written order ─
+delpaths_bad_entry_value_order	delpaths([1,"a",null])	null
+delpaths_bad_entry_dot	delpaths(.)	[1,"a",null]
+delpaths_bad_entry_after_array	delpaths([[1],"a",true])	[1,2]
+delpaths_bad_entry_object_last	delpaths([{},[0],"a"])	[1,2]
+delpaths_bad_entry_only_object	delpaths([{}])	[1,2]

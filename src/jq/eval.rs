@@ -8434,7 +8434,18 @@ pub(crate) fn classify_nth_n(n_owned: OwnedValue) -> Result<usize, EvalError> {
             // silently answering `0`.
             Ok(ceil_positive_float_to_usize(f + 1.0) - 1)
         }
-        other => Err(EvalError::type_error("number", other.type_name())),
+        // jq's guard is `if $n < 0 then error(...)`. `null`, `false` and `true` sort below every
+        // number, so they take that branch; a string, array or object sorts above, so the guard
+        // passes and `limit($n + 1; g)` raises on the addition (#5309), as `classify_limit_n`'s
+        // `-1` does for `limit`.
+        OwnedValue::Null | OwnedValue::Bool(_) => {
+            Err(EvalError::new("nth doesn't support negative indices"))
+        }
+        other => Err(EvalError::binary_op(
+            &other,
+            &OwnedValue::Int(1),
+            BinOp::Add,
+        )),
     }
 }
 
@@ -25444,6 +25455,26 @@ fn build_regex(pattern: &str, flags: Option<&str>) -> Result<JqRegex, EvalError>
     })
 }
 
+/// jq's regex builtins bottom out in `_match_impl`, a C function that reads its **input** before
+/// it looks at the pattern or the flags: `null | match(1; 2)` is `null (null) cannot be matched,
+/// as it is not a string`, not a complaint about `1` (#5309). The argument checks below
+/// therefore run only once the input is known to be a string; this is the input half, taken
+/// before them.
+///
+/// `Some(input)` when the input is not a string, in jq mode only: yq's own order is not the
+/// one captured here, and it keeps what it had. The bare `test(re)` form's `not a string or
+/// array` refusal is a jq-level `def` that runs before the call, so it still comes first
+/// (see [`resolve_regex_args`]).
+#[cfg(feature = "regex")]
+fn regex_non_string_input<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
+    value: &StandardJson<'_, W>,
+) -> Option<OwnedValue> {
+    if S::TAG == EvalTag::Yq || matches!(value, StandardJson::String(_)) {
+        return None;
+    }
+    Some(to_owned_lossy::<S, _>(value))
+}
+
 /// Which family a regex builtin belongs to — this determines *both* its
 /// argument-evaluation order (#942) and its bare-form pattern wording
 /// (#937) together, since in jq's real model the two facts aren't
@@ -25527,6 +25558,7 @@ fn resolve_regex_args<S: EvalSemantics>(
     raw_flags: Option<OwnedValue>,
     flags_present: bool,
     family: RegexArgFamily,
+    bad_input: Option<&OwnedValue>,
 ) -> Result<(String, Option<String>), EvalError> {
     // #943: `test`/`match`/`capture`'s *bare* form (no flags argument at all)
     // additionally unpacks a non-empty array pattern via the shared
@@ -25590,6 +25622,19 @@ fn resolve_regex_args<S: EvalSemantics>(
             if let Some(s) = flags_str {
                 validate_yq_match_flags(&s)?;
             }
+        }
+    }
+
+    // #5309: the input is checked before the pattern and the flags, except that the bare
+    // `test(re)` form's own `not a string or array` refusal (a jq-level `def`, run before the
+    // call) still wins when the pattern cannot even be unpacked.
+    if let Some(input) = bad_input {
+        let bare_refusal = matches!(family, RegexArgFamily::TestMatchCapture)
+            && !flags_present
+            && !array_unpacked
+            && !matches!(raw_pattern, OwnedValue::String(_));
+        if !bare_refusal {
+            return Err(EvalError::cannot_be_matched(input));
         }
     }
 
@@ -25673,12 +25718,14 @@ fn fanout_regex_pattern_and_flags<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>
     // ADR-0018.
     let fanout = ArgFanout::yq_text_arg::<S>();
     let flags_present = flags_expr.is_some();
+    let bad_input = regex_non_string_input::<W, S>(&value);
     let mut run =
         |raw_pattern: OwnedValue, raw_flags: Option<OwnedValue>| match resolve_regex_args::<S>(
             raw_pattern,
             raw_flags,
             flags_present,
             family,
+            bad_input.as_ref(),
         ) {
             Ok((pattern, flags)) => body(&pattern, flags.as_deref()),
             Err(e) => QueryResult::Error(e),
@@ -27014,11 +27061,17 @@ fn yq_sub_arity3_empty_replace<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
             // `raw_flags: None`: arity-3 `sub` ignores flags entirely (see
             // this function's own doc comment), so the returned flags half
             // is simply discarded rather than validated.
-            let pattern =
-                match resolve_regex_args::<S>(raw_pattern, None, false, RegexArgFamily::Sub) {
-                    Ok((pattern, _flags)) => pattern,
-                    Err(e) => return QueryResult::Error(e),
-                };
+            let bad_input = regex_non_string_input::<W, S>(&value);
+            let pattern = match resolve_regex_args::<S>(
+                raw_pattern,
+                None,
+                false,
+                RegexArgFamily::Sub,
+                bad_input.as_ref(),
+            ) {
+                Ok((pattern, _flags)) => pattern,
+                Err(e) => return QueryResult::Error(e),
+            };
 
             // The three `if optional` guards below mirror every sibling
             // builtin's own `_ if optional => QueryResult::None` arm (see
@@ -27213,6 +27266,7 @@ fn resolve_concat_flags<S: EvalSemantics>(
     raw_pattern: OwnedValue,
     raw_flags: OwnedValue,
     concat: FlagsConcat,
+    bad_input: Option<&OwnedValue>,
 ) -> Result<(String, String), EvalError> {
     // jq's own "+" operator, `arith_add`, already implements exactly what
     // this concatenation needs: string concat, `null` as an identity
@@ -27254,6 +27308,12 @@ fn resolve_concat_flags<S: EvalSemantics>(
         ),
         Err(e) => return Err(e),
     };
+
+    // #5309: the flags concatenation above is an argument of the `match` call in jq's `def`, so
+    // it fails first; the input is read before the pattern (see `regex_non_string_input`).
+    if let Some(input) = bad_input {
+        return Err(EvalError::cannot_be_matched(input));
+    }
 
     // #1443: same yq-mode scalar-pattern coercion as `resolve_regex_args`
     // -- `split(re; flags)` is real yq surface (unlike `gsub`/`scan`/
@@ -27317,10 +27377,16 @@ fn fanout_regex_pattern_with_collected_flags<'a, W: Clone + AsRef<[u64]>, S: Eva
             // semantics instead of raising.
             let (raw_flags_values, trailing) =
                 stream_outputs::<_, S>(eval_single::<W, S>(flags_expr, value.clone(), optional));
+            let bad_input = regex_non_string_input::<W, S>(&value);
             let mut resolved_pattern: Option<String> = None;
             let mut flags = vec_with_capacity(raw_flags_values.len());
             for raw_flags in raw_flags_values {
-                match resolve_concat_flags::<S>(raw_pattern.clone(), raw_flags, concat) {
+                match resolve_concat_flags::<S>(
+                    raw_pattern.clone(),
+                    raw_flags,
+                    concat,
+                    bad_input.as_ref(),
+                ) {
                     Ok((p, f)) => {
                         resolved_pattern = Some(p);
                         flags.push(f);
@@ -27375,6 +27441,7 @@ fn fanout_regex_pattern_and_concat_flags<'a, W: Clone + AsRef<[u64]>, S: EvalSem
     optional: bool,
     body: &mut dyn FnMut(&str, &str) -> QueryResult<'a, W>,
 ) -> QueryResult<'a, W> {
+    let bad_input = regex_non_string_input::<W, S>(&value);
     fanout_two_args::<W, S>(
         re_expr,
         flags_expr,
@@ -27383,7 +27450,12 @@ fn fanout_regex_pattern_and_concat_flags<'a, W: Clone + AsRef<[u64]>, S: EvalSem
         // Real yq rejects `gsub`/`scan` at its lexer entirely, so jq's model
         // is unopposed here; see `builtin_ltrimstr`.
         ArgFanout::All,
-        |raw_pattern, raw_flags| match resolve_concat_flags::<S>(raw_pattern, raw_flags, concat) {
+        |raw_pattern, raw_flags| match resolve_concat_flags::<S>(
+            raw_pattern,
+            raw_flags,
+            concat,
+            bad_input.as_ref(),
+        ) {
             Ok((pattern, flags)) => body(&pattern, &flags),
             Err(e) => QueryResult::Error(e),
         },
@@ -27451,7 +27523,11 @@ fn builtin_gsub_with_flags<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         ArgFanout::yq_native::<S>(),
         |raw_pattern| {
             let OwnedValue::String(pattern) = raw_pattern else {
-                return QueryResult::Error(EvalError::is_not_a_string(&raw_pattern));
+                // #5309: the input is read before the pattern.
+                return QueryResult::Error(match regex_non_string_input::<W, S>(&value) {
+                    Some(input) => EvalError::cannot_be_matched(&input),
+                    None => EvalError::is_not_a_string(&raw_pattern),
+                });
             };
             sub_with_resolved_pattern::<W, S>(
                 &pattern,
@@ -27505,7 +27581,11 @@ fn builtin_scan_with_flags<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         ArgFanout::All,
         |raw_pattern| {
             let OwnedValue::String(pattern) = raw_pattern else {
-                return QueryResult::Error(EvalError::is_not_a_string(&raw_pattern));
+                // #5309: the input is read before the pattern.
+                return QueryResult::Error(match regex_non_string_input::<W, S>(&value) {
+                    Some(input) => EvalError::cannot_be_matched(&input),
+                    None => EvalError::is_not_a_string(&raw_pattern),
+                });
             };
             scan_with_resolved_pattern::<W, S>(&pattern, "g", value.clone(), optional)
         },
@@ -27775,7 +27855,11 @@ fn builtin_splits_with_flags<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         |raw_pattern| {
             let global = "g".to_string();
             let OwnedValue::String(pattern) = raw_pattern else {
-                return QueryResult::Error(EvalError::is_not_a_string(&raw_pattern));
+                // #5309: the input is read before the pattern.
+                return QueryResult::Error(match regex_non_string_input::<W, S>(&value) {
+                    Some(input) => EvalError::cannot_be_matched(&input),
+                    None => EvalError::is_not_a_string(&raw_pattern),
+                });
             };
             splits_with_resolved_pattern::<W, S>(
                 &pattern,
@@ -91974,7 +92058,14 @@ pub(crate) fn delpaths_jq_prepare(paths: OwnedValue) -> Result<ArrayVec, EvalErr
     let OwnedValue::Array(mut paths) = paths else {
         return Err(EvalError::paths_must_be_array());
     };
-    if let Some(bad) = paths.iter().find(|p| !matches!(p, OwnedValue::Array(_))) {
+    // jq sorts the list and then validates it front to back, so the entry it names is the
+    // first non-array in value order (`null`, then the booleans, numbers, strings), not the
+    // first one written: `delpaths([1, "a", null])` is `not null` (#5309).
+    if let Some(bad) = paths
+        .iter()
+        .filter(|p| !matches!(p, OwnedValue::Array(_)))
+        .min_by(|a, b| compare_values::<JqSemantics>(a, b))
+    {
         return Err(EvalError::path_must_be_array_not(bad.type_name()));
     }
     // Every path is an array by now (checked above).
