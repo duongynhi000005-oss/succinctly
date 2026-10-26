@@ -29,9 +29,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 #[cfg(not(test))]
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeSet;
 #[cfg(test)]
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use super::eval::{
     arith_combine, compare_values, contains_retrying_pattern_bind, yq_scalar_text_eq, EvalError,
@@ -39,8 +39,9 @@ use super::eval::{
 };
 use super::expr::{
     ArithOp, ArithSettleMemo, AssignOp, Builtin, CompareOp, Expr, FormatType, FuncDefBound, Import,
-    Include, Libm1, Libm2, Libm3, Literal, MergeFlags, MetaSlot, MetaValue, ModuleMeta, NumberKey,
-    ObjectEntry, ObjectKey, Param, Pattern, PatternEntry, Program, SliceBoundKey, StringPart,
+    Include, Libm1, Libm2, Libm3, Literal, MergeFlags, MetaObject, MetaSlot, MetaValue, ModuleMeta,
+    NumberKey, ObjectEntry, ObjectKey, Param, Pattern, PatternEntry, Program, SliceBoundKey,
+    StringPart,
 };
 use super::value::{parse_i64_or_f64_in, NumberRepr, OwnedValue};
 use super::walk::{any_subexpr, map_subexprs};
@@ -9608,18 +9609,22 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse a metadata object: `{ key: value, ... }`
-    fn parse_metadata_object(&mut self) -> Result<BTreeMap<String, MetaValue>, ParseError> {
+    fn parse_metadata_object(&mut self) -> Result<MetaObject, ParseError> {
         if self.peek() != Some('{') {
             return Err(ParseError::new("expected '{' for metadata", self.pos));
         }
         self.next();
         self.skip_ws();
 
-        let mut map = BTreeMap::new();
+        let mut map = MetaObject::new();
 
         while self.peek() != Some('}') {
-            // Parse key
-            let key = self.parse_ident()?;
+            // Parse key: an identifier, or a string literal as in any jq object (#5321)
+            let key = if self.peek() == Some('"') {
+                self.parse_string_literal()?
+            } else {
+                self.parse_ident()?
+            };
             self.skip_ws();
 
             // Expect ':'
@@ -9631,7 +9636,11 @@ impl<'a> Parser<'a> {
 
             // Parse value
             let value = self.parse_meta_value()?;
-            map.insert(key, value);
+            // A repeated key keeps its first position and takes the last value.
+            match map.iter_mut().find(|(seen, _)| *seen == key) {
+                Some(entry) => entry.1 = value,
+                None => map.push((key, value)),
+            }
 
             self.skip_ws();
 
@@ -9668,10 +9677,19 @@ impl<'a> Parser<'a> {
                     if self.peek() == Some(',') {
                         self.next();
                         self.skip_ws();
+                    } else if self.peek() != Some(']') {
+                        return Err(ParseError::new(
+                            "expected ',' or ']' in metadata array",
+                            self.pos,
+                        ));
                     }
                 }
                 self.next(); // consume ']'
                 Ok(MetaValue::Array(arr))
+            }
+            Some('n') if self.matches_keyword("null") => {
+                self.consume_keyword("null");
+                Ok(MetaValue::Null)
             }
             Some('t') if self.matches_keyword("true") => {
                 self.consume_keyword("true");

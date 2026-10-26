@@ -138,9 +138,9 @@ pub use eval::input_queue_is_active;
 pub use eval::cli_context;
 pub use expr::{
     ArithOp, ArithSettleMemo, AssignOp, BoundBody, Builtin, CompareOp, Expr, FormatType,
-    FuncDefBound, FuncDefData, Import, Include, Libm1, Libm2, Libm3, Literal, MetaSlot, MetaValue,
-    ModuleMeta, NumberKey, ObjectEntry, ObjectKey, Param, Pattern, PatternEntry, PipeStages,
-    Program, SharedArg, SliceBoundKey, StringPart,
+    FuncDefBound, FuncDefData, Import, Include, Libm1, Libm2, Libm3, Literal, MetaObject, MetaSlot,
+    MetaValue, ModuleMeta, NumberKey, ObjectEntry, ObjectKey, Param, Pattern, PatternEntry,
+    PipeStages, Program, SharedArg, SliceBoundKey, StringPart,
 };
 pub use lazy::JqValue;
 pub use parser::{
