@@ -153,4 +153,3 @@ mod i5301;
 mod i5304;
 mod i5312;
 mod i5322;
-mod i5322;
