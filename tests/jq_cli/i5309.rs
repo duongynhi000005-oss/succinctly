@@ -127,6 +127,13 @@ fn test_json_text_refusals_name_the_first_fault_5309() -> Result<()> {
             "\"\\\"a\\u0000\\\"\" | try fromjson catch .",
             "\"Invalid string: control characters from U+0000 through U+001F must be escaped at line 1, column 4 (while parsing '\\\"a')\"\n",
         ),
+        // jq's parser skips only space, tab, CR and LF: a vertical tab or a no-break space in
+        // front of a number is a bad literal for `tonumber` as it is for `fromjson`.
+        (
+            "\"\\u000b1\" | try tonumber catch .",
+            "\"Invalid numeric literal at EOF at line 1, column 2 (while parsing '\\u000b1')\"\n",
+        ),
+        ("\" 1\\t\\r\\n\" | tonumber", "1\n"),
         // Whitespace round a lone value is fine; a second value is the fault.
         ("\" 1 \" | fromjson", "1\n"),
         ("\" 1 2 \" | try fromjson catch .", "\"Unexpected extra JSON values (while parsing ' 1 2 ')\"\n"),

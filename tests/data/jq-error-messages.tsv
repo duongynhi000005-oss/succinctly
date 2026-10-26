@@ -306,3 +306,7 @@ fromjson_overlong_true	fromjson	"truee"	Invalid literal at EOF at line 1, column
 fromjson_bom_only	fromjson	"\ufeff"	Expected JSON value (while parsing '﻿')
 fromjson_doubled_bom	fromjson	"\ufeff\ufeff1"	Invalid numeric literal at EOF at line 1, column 4 (while parsing '﻿﻿1')
 fromjson_whitespace_only	fromjson	" "	Expected JSON value (while parsing ' ')
+fromjson_control_char_unit_separator	fromjson	"\"a\u001fb\""	Invalid string: control characters from U+0000 through U+001F must be escaped at line 1, column 5 (while parsing '"ab"')
+fromjson_control_char_record_separator	fromjson	"\"a\u001eb\""	Invalid string: control characters from U+0000 through U+001F must be escaped at line 1, column 5 (while parsing '"ab"')
+tonumber_vertical_tab_is_not_whitespace	tonumber	"\u000b1"	Invalid numeric literal at EOF at line 1, column 2 (while parsing '1')
+tonumber_no_break_space_is_not_whitespace	tonumber	"\u00a01"	Invalid numeric literal at EOF at line 1, column 3 (while parsing ' 1')

@@ -22947,7 +22947,12 @@ pub(super) fn tonumber_from_str(s: &str, yq_mode: bool) -> Result<OwnedValue, Ev
     let trimmed = if yq_mode {
         s
     } else {
-        c_text.strip_prefix('\u{feff}').unwrap_or(c_text).trim()
+        // jq's parser skips only space, tab, CR and LF, not the Unicode whitespace `trim`
+        // knows (`"\u000b1" | tonumber` is refused).
+        c_text
+            .strip_prefix('\u{feff}')
+            .unwrap_or(c_text)
+            .trim_matches(|c| matches!(c, ' ' | '\t' | '\r' | '\n'))
     };
     // Materialize a JSON-shaped number as a `NumberLiteral` so it keeps its
     // *source spelling*, rather than collapsing it through a bare
@@ -25487,6 +25492,18 @@ fn regex_non_string_input<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     Some(value.clone())
 }
 
+/// The refusal for a pattern that is not a string where the input is read first (#5309): the
+/// input's own refusal when it is not a string either, else the pattern's.
+fn regex_pattern_refusal<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
+    value: &StandardJson<'_, W>,
+    raw_pattern: &OwnedValue,
+) -> EvalError {
+    match regex_non_string_input::<W, S>(value) {
+        Some(input) => regex_input_refusal::<W, S>(&input),
+        None => EvalError::is_not_a_string(raw_pattern),
+    }
+}
+
 /// The refusal for an input that [`regex_non_string_input`] found not to be a string.
 fn regex_input_refusal<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     input: &StandardJson<'_, W>,
@@ -27542,11 +27559,7 @@ fn builtin_gsub_with_flags<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         ArgFanout::yq_native::<S>(),
         |raw_pattern| {
             let OwnedValue::String(pattern) = raw_pattern else {
-                // #5309: the input is read before the pattern.
-                return QueryResult::Error(match regex_non_string_input::<W, S>(&value) {
-                    Some(input) => regex_input_refusal::<W, S>(&input),
-                    None => EvalError::is_not_a_string(&raw_pattern),
-                });
+                return QueryResult::Error(regex_pattern_refusal::<W, S>(&value, &raw_pattern));
             };
             sub_with_resolved_pattern::<W, S>(
                 &pattern,
@@ -27600,11 +27613,7 @@ fn builtin_scan_with_flags<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         ArgFanout::All,
         |raw_pattern| {
             let OwnedValue::String(pattern) = raw_pattern else {
-                // #5309: the input is read before the pattern.
-                return QueryResult::Error(match regex_non_string_input::<W, S>(&value) {
-                    Some(input) => regex_input_refusal::<W, S>(&input),
-                    None => EvalError::is_not_a_string(&raw_pattern),
-                });
+                return QueryResult::Error(regex_pattern_refusal::<W, S>(&value, &raw_pattern));
             };
             scan_with_resolved_pattern::<W, S>(&pattern, "g", value.clone(), optional)
         },
@@ -27874,11 +27883,7 @@ fn builtin_splits_with_flags<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         |raw_pattern| {
             let global = "g".to_string();
             let OwnedValue::String(pattern) = raw_pattern else {
-                // #5309: the input is read before the pattern.
-                return QueryResult::Error(match regex_non_string_input::<W, S>(&value) {
-                    Some(input) => regex_input_refusal::<W, S>(&input),
-                    None => EvalError::is_not_a_string(&raw_pattern),
-                });
+                return QueryResult::Error(regex_pattern_refusal::<W, S>(&value, &raw_pattern));
             };
             splits_with_resolved_pattern::<W, S>(
                 &pattern,
@@ -92082,19 +92087,10 @@ pub(crate) fn delpaths_jq_prepare(paths: OwnedValue) -> Result<ArrayVec, EvalErr
     // first one written: `delpaths([1, "a", null])` is `not null` (#5309).
     // Only the kind is named, so the kind alone decides; a full value comparison would descend
     // into entries whose contents never reach the message.
-    let kind_rank = |value: &OwnedValue| match value {
-        OwnedValue::Null => 0,
-        OwnedValue::Bool(false) => 1,
-        OwnedValue::Bool(true) => 2,
-        OwnedValue::String(_) => 4,
-        OwnedValue::Array(_) => 5,
-        OwnedValue::Object(_) => 6,
-        _ => 3,
-    };
     if let Some(bad) = paths
         .iter()
         .filter(|p| !matches!(p, OwnedValue::Array(_)))
-        .min_by_key(|p| kind_rank(p))
+        .min_by_key(|p| sort_rank(p))
     {
         return Err(EvalError::path_must_be_array_not(bad.type_name()));
     }

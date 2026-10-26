@@ -146,7 +146,7 @@ fn check_string(token: &[u8]) -> Result<(), Stop> {
         let byte = token[at];
         at += 1;
         if byte != b'\\' {
-            if byte < 0o36 {
+            if byte < 0x20 {
                 return Err(Stop::Fault(
                     "Invalid string: control characters from U+0000 through U+001F must be escaped",
                 ));
