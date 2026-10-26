@@ -207,6 +207,14 @@ pub struct ModuleLoader {
     reachable_calls: BTreeMap<String, Vec<BTreeSet<String>>>,
     /// Auto-loaded ~/.jq file definitions (if file exists): name, params, body
     auto_loaded_defs: FuncDefList,
+    /// A `~/.jq` file that carries an `include`/`import`, parsed and waiting for
+    /// [`Self::bind_dot_jq`] to resolve those directives (#5339). `None` for a `~/.jq`
+    /// without any, whose defs are already in [`Self::auto_loaded_defs`], and once bound.
+    dot_jq: Option<DotJq>,
+    /// The path of a `~/.jq` that carries directives, bound or not, so
+    /// [`Self::failure_report`] can walk them last, where jq does (#5339). `None` for one
+    /// without any: there is nothing of it to walk.
+    dot_jq_path: Option<PathBuf>,
     /// The modules whose own dependencies are currently being loaded, as
     /// `(resolved canonical file, module path as written)`, outermost first
     /// (#2865).
@@ -245,6 +253,14 @@ pub struct ModuleLoader {
     /// re-derived from `Program`'s paths so [`Self::walk_modules`] does not
     /// repeat those filesystem lookups.
     top_ids: Vec<(usize, u32)>,
+}
+
+/// A parsed `~/.jq` whose `include`/`import` directives are not resolved yet (#5339).
+#[derive(Debug)]
+struct DotJq {
+    program: Program,
+    contents: String,
+    path: PathBuf,
 }
 
 /// How [`ModuleLoader::walk_modules`] reached a module.
@@ -1212,7 +1228,10 @@ impl FailureWalk<'_> {
     /// jq's `process_dependencies` for one level: the failures reported and
     /// the count this level returns, `directives` already in walk order.
     ///
-    fn directives(&mut self, directives: &[Directive<'_>]) -> usize {
+    /// `dot_jq` is the `~/.jq` file at the top level: jq declares it ahead of every
+    /// directive in the program, so it is reached after all of them and only if none
+    /// of them stopped the level (#5339).
+    fn directives(&mut self, directives: &[Directive<'_>], dot_jq: Option<&Path>) -> usize {
         let mut errors = 0;
         for directive in directives {
             let resolved = if directive.data {
@@ -1238,6 +1257,12 @@ impl FailureWalk<'_> {
                 continue;
             }
             errors += self.module(directive.path, &resolved);
+            if self.halted {
+                return 1;
+            }
+        }
+        if let Some(file) = dot_jq {
+            errors += self.module("~/.jq", file);
             if self.halted {
                 return 1;
             }
@@ -1296,7 +1321,7 @@ impl FailureWalk<'_> {
             Ok(program) => {
                 self.chain
                     .push((canonical.to_path_buf(), as_written.to_string()));
-                let errors = self.directives(&directives_of(&program));
+                let errors = self.directives(&directives_of(&program), None);
                 self.chain.pop();
                 errors
             }
@@ -1309,6 +1334,8 @@ impl ModuleLoader {
     pub fn new(library_paths: &[PathBuf]) -> Self {
         let mut lib_dirs = Vec::new();
         let mut auto_loaded_defs = Vec::new();
+        let mut dot_jq = None;
+        let mut dot_jq_path = None;
 
         // Add command-line -L paths first
         for path in library_paths {
@@ -1345,7 +1372,19 @@ impl ModuleLoader {
                             AUTO_LOAD_RUN_ID,
                             canonical_or_self(&jq_path).to_string_lossy().into_owned(),
                         );
-                        auto_loaded_defs = extract_and_stamp_func_defs(&program.expr, jq_path);
+                        if program.includes.is_empty() && program.imports.is_empty() {
+                            auto_loaded_defs = extract_and_stamp_func_defs(&program.expr, jq_path);
+                        } else {
+                            // Its directives resolve against the search path, which is
+                            // not complete until the end of this function, and a failure
+                            // is a compile error this constructor cannot return (#5339).
+                            dot_jq_path = Some(jq_path.clone());
+                            dot_jq = Some(DotJq {
+                                program,
+                                contents,
+                                path: jq_path,
+                            });
+                        }
                     }
                 }
             } else if jq_path.is_dir() {
@@ -1371,6 +1410,8 @@ impl ModuleLoader {
             loaded_modules: BTreeMap::new(),
             reachable_calls: BTreeMap::new(),
             auto_loaded_defs,
+            dot_jq,
+            dot_jq_path,
             loading: Vec::new(),
             run_ids: BTreeMap::new(),
             run_origins,
@@ -1554,7 +1595,53 @@ impl ModuleLoader {
         })?;
 
         let own_id = self.run_id_for(module_path);
-        self.loading.push((canonical, module_path.to_string()));
+        self.bind_parsed_module(
+            program,
+            &contents,
+            file_path,
+            canonical,
+            module_path,
+            own_id,
+        )
+    }
+
+    /// Resolve `~/.jq`'s own `include`/`import` directives and bind its defs to them, as
+    /// any module's are (#5339). A no-op once done, and for a `~/.jq` with no directives.
+    ///
+    /// jq treats `~/.jq` as an `include` declared ahead of everything in the program, so
+    /// its dependencies resolve on the default search list (the current directory, then
+    /// `-L`) and stay its own: like a module's, they are not visible to the main filter.
+    /// Run id [`AUTO_LOAD_RUN_ID`] is its own run, which is where those dependencies are
+    /// linked from (see [`Self::walk_modules`]).
+    fn bind_dot_jq(&mut self) -> Result<(), ModuleLoadError> {
+        let Some(dot) = self.dot_jq.take() else {
+            return Ok(());
+        };
+        let canonical = canonical_or_self(&dot.path);
+        let (defs, _reachable) = self.bind_parsed_module(
+            dot.program,
+            &dot.contents,
+            dot.path,
+            canonical,
+            "~/.jq",
+            AUTO_LOAD_RUN_ID,
+        )?;
+        self.auto_loaded_defs = defs;
+        Ok(())
+    }
+
+    /// The part of [`Self::load_and_bind_module`] that follows reading and parsing, for a
+    /// module with run id `own_id` (`~/.jq` is [`AUTO_LOAD_RUN_ID`], #5339).
+    fn bind_parsed_module(
+        &mut self,
+        program: Program,
+        contents: &str,
+        file_path: PathBuf,
+        canonical: PathBuf,
+        as_written: &str,
+        own_id: u32,
+    ) -> Result<(FuncDefList, Vec<BTreeSet<String>>), ModuleLoadError> {
+        self.loading.push((canonical, as_written.to_string()));
         let deps = self.module_dep_defs(&program, own_id);
         self.loading.pop();
         let (deps, data_bindings) = deps?;
@@ -1600,7 +1687,7 @@ impl ModuleLoader {
             // fallback comment gives in full: this can only succeed wherever
             // the plain parse above did.
             jq::parse_program_with_extra_shadowable_defs(
-                &contents,
+                contents,
                 jq::ParserMode::Jq,
                 false,
                 &module_def_names,
@@ -1814,6 +1901,11 @@ impl ModuleLoader {
         for (_, id) in top {
             visit(self, id, false, &mut expanded, on);
         }
+        // `~/.jq` is declared ahead of everything in the program (#5339), so it is the
+        // last one the last-declared-first walk reaches.
+        if self.deps_of.contains_key(&AUTO_LOAD_RUN_ID) {
+            visit(self, AUTO_LOAD_RUN_ID, false, &mut expanded, on);
+        }
     }
 
     /// The modules that need a link run (#2955), outermost first: a module
@@ -1892,6 +1984,9 @@ impl ModuleLoader {
         &mut self,
         program: &Program,
     ) -> Result<BTreeSet<String>, ModuleLoadError> {
+        if let Err(e) = self.bind_dot_jq() {
+            return Err(self.failure_report(program, e));
+        }
         let mut names: BTreeSet<String> = self
             .auto_loaded_defs
             .iter()
@@ -1972,7 +2067,7 @@ impl ModuleLoader {
             entries: Vec::new(),
             halted: false,
         };
-        let errors = walk.directives(&directives_of(program));
+        let errors = walk.directives(&directives_of(program), self.dot_jq_path.as_deref());
         // The walk repeats the loader's resolution, parse and cycle checks, so
         // a directive the loader failed on is one it fails on too. If the two
         // ever drift apart, the loader's own report is the one to print: an
@@ -1989,6 +2084,10 @@ impl ModuleLoader {
     /// Process imports and includes, returning the modified expression with all functions defined.
     pub fn process_program(&mut self, program: &Program) -> Result<Expr, ModuleLoadError> {
         let mut expr = program.expr.clone();
+
+        if let Err(e) = self.bind_dot_jq() {
+            return Err(self.failure_report(program, e));
+        }
 
         // As in `unqualified_def_names`, the first directive that fails to load
         // ends the pass, and [`Self::failure_report`] walks the whole program
