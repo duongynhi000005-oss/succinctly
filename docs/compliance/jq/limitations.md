@@ -6564,6 +6564,32 @@ $ echo '{"a":{"k":tru},"b":2}' | sjq -c '[(., .) | .a]'   # (raises)          ex
 The `.a` row shows the rule still holds: a node the array *holds* is validated before anything
 prints.
 
+### A string with an invalid escape or a lone high surrogate is echoed by a filter that only forwards it (#5308)
+
+jq 1.7.1 rejects the document at parse time, whatever the filter, with exit 2.
+`"\x"` is `Invalid escape`, and `"\ud800"` (a high surrogate with no low one after it) is `Invalid \uXXXX\uXXXX surrogate pair escape`.
+succinctly checks neither escape when it builds the index, so the verdict depends on what the filter does with the string.
+This is the rule of [#2103](https://github.com/rust-works/succinctly/issues/2103) and [#2168](https://github.com/rust-works/succinctly/issues/2168), "a filter validates only what it reads", applied to a string value rather than a key or a keyword.
+Measured against the pinned `/usr/bin/jq` on the scalar documents `"\x"`, `"\ud800"` and `"\ud800A"`:
+
+| filter                                                             | jq 1.7.1            | succinctly                                                          |
+|--------------------------------------------------------------------|---------------------|---------------------------------------------------------------------|
+| `.`, `.,.`, `select(.)`, `-s .`                                    | parse error, exit 2 | echoes the source span (`"\x"`), exit 0                             |
+| `-r .`                                                             | parse error, exit 2 | echoes the source span *with its quotes*, exit 0                    |
+| `if . then 1 else 2 end`                                           | parse error, exit 2 | `1`, exit 0                                                         |
+| `type`                                                             | parse error, exit 2 | `"string"`, exit 0                                                  |
+| `length`, `tostring`, `tojson`, `. == "x"`, `[.]`, `{a:.}`, `-S .` | parse error, exit 2 | raises `invalid escape sequence` / `invalid unicode escape`, exit 5 |
+| `--validate`                                                       | (not applicable)    | rejects, exit 3                                                     |
+| `succinctly json validate`                                         | (not applicable)    | rejects with a located diagnostic, exit 1                           |
+
+Inside a container the filter has to reach the string to be affected: over `["\x"]` or `{"a":"\ud800"}`, `length` and `type` answer (`1`, `"array"`), `.[]` forwards the string, and `tostring` raises.
+A lone *low* surrogate is not part of this: jq accepts it and substitutes U+FFFD, and so does succinctly ([#2008](https://github.com/rust-works/succinctly/issues/2008)).
+
+This is recorded on the same footing as the #2103 entry above, and adds no reasoning of its own.
+It is a divergence from a reference that rejects, not a licence: [ADR-0018](../../adrs/adr-0018.md)'s decision order still applies, and the cost argument (always-on validation is two thirds of a cheap navigation query) is context, not a condition it accepts.
+A user who wants jq's rejection has `--validate` or `succinctly json validate`.
+`test_forwarding_filter_echoes_a_string_with_an_undecodable_escape_5308`, `test_reading_filter_raises_on_a_string_with_an_undecodable_escape_5308` and `test_validate_rejects_a_string_with_an_undecodable_escape_5308` pin the split.
+
 ### PR #2291 code review: eleven more sibling paths, found by a systematic sweep
 
 Code review on the PR carrying the section above found and live-confirmed
