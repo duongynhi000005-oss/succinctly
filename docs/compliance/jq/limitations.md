@@ -346,21 +346,6 @@ Both builtins do require the *whole* string to be one JSON value, which is the p
 matters for the result rather than the message: `"0x10" | fromjson` errors as jq does
 instead of returning `0`, and `"1 2" | fromjson` errors instead of returning `1`.
 
-## Float literals lose their source spelling
-
-jq's arithmetic messages echo the literal as written, because it keeps the number's
-original text:
-
-```bash
-$ echo null | jq '1 / 0.0'
-jq: error (at <stdin>:1): number (1) and number (0.0) cannot be divided because the divisor is zero
-```
-
-`OwnedValue::Float(0.0).to_json()` renders `0`, so succinctly says `number (0)` there.
-This is the general "JSON numbers are re-rendered, not echoed" property of the evaluator
-rather than anything specific to errors, and it only shows for float literals whose
-shortest rendering differs from their source spelling.
-
 ## The math builtins print the platform libm's last bit, as jq does (#3045)
 
 jq does not compute `sin`, `exp`, `pow`, `sqrt`, ... itself: each is a one-line call into
@@ -10119,9 +10104,13 @@ verification are both about value mode; a follow-up applying the identical
 demand-driven treatment to `resolve_repeat_sink` would close this the
 same way.
 
-### `reduce`/`foreach`'s own step budget (#695/#2079): bounds genuine fanout, not ordinary element count
+### `reduce`/`foreach`'s own step budget (#695/#2079): a flat per-step cap that refuses input-sized folds (#5292)
 
 > The budget's raise is uncatchable by `?`/`try`/`catch` since #2132 -- see "Every resource cap is uncatchable" below.
+
+> This section used to be headed "bounds genuine fanout, not ordinary element count", and that was never true of the shipped cap.
+> The budget is a flat count of steps, so a plain 200,000-element fold (`reduce range(200000) as $x (0; . + $x)`) is refused where jq answers `19999900000`.
+> #5292 tracks lifting it; the history below is why the number is what it is.
 
 `REDUCE_FOREACH_MAX_STEPS` (`src/jq/eval.rs`) is a shared step budget charged
 against `reduce`/`foreach` once per UPDATE eval, and -- `foreach` only --
