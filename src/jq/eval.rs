@@ -12183,6 +12183,9 @@ pub(crate) fn try_eval_owned_step<S: EvalSemantics>(expr: &Expr, state: OwnedVal
     if is_owned_assign(expr) || is_owned_setpath(expr) {
         return try_owned_assign_step::<S>(expr, state);
     }
+    if let Some(stages) = owned_assign_pipe_stages::<S>(expr) {
+        return owned_assign_pipe_step::<S>(stages, state);
+    }
     // `.[1:]` as a fold's UPDATE (#5274): a slice with literal bounds of an array or a string
     // is a plain cut of the owned value, which shares its elements. Through the bridge each
     // step wrote the whole state out as JSON and indexed it again. An array this step owns
@@ -12240,6 +12243,100 @@ pub(crate) fn try_owned_assign_step<S: EvalSemantics>(
         Some(Ok(())) => OwnedStep::Handled(Ok(state)),
         Some(Err(error)) => OwnedStep::Handled(Err(error)), // patchcov: coverage tolerate-line reason="reachable only on a genuine allocation failure (for the assignment forms; `owned_setpath_step` reports its own write errors without going through this arm): owned_assign_step's single-step arms map every non-allocation error to unreachable_owned_assign_write (provably impossible, see its own doc comment), and its Chain arm's set_path call walks exactly the steps owned_assign_step_child already validated as Field-into-Object/Null or Index-in-[0,len]-into-Array/Null with no mutation in between, so the only way set_path/set_field/set_index/pad_with_nulls can still fail is the same try_reserve-fails-under-OOM branch the codebase already tolerates elsewhere (#2267) (#3138)"
         None => OwnedStep::Declined(state),
+    }
+}
+
+/// The stages of a pipe of assignments [`owned_assign_pipe_step`] may apply (#5285): jq mode,
+/// not under the #2889 embed table, an assignment first -- the stage that may still decline
+/// cleanly -- and after it only assignments that yield exactly one value or raise
+/// ([`owned_one_value_assign_shape`]). Any other pipe (`to_entries | ...`, a stage that may
+/// fan out) keeps [`eval_owned_reindex_free`]'s borrowed route.
+fn owned_assign_pipe_stages<S: EvalSemantics>(expr: &Expr) -> Option<&[Expr]> {
+    let (EvalTag::Jq, Expr::Pipe(stages)) = (S::TAG, unwrap_paren(expr)) else {
+        return None;
+    };
+    let [first, rest @ ..] = stages.as_slice() else {
+        return None;
+    };
+    (is_owned_assign(unwrap_paren(first))
+        && !rest.is_empty()
+        && rest.iter().all(owned_one_value_assign_shape)
+        && !super::eval_generic::embed_table_active())
+    .then_some(stages.as_slice())
+}
+
+/// Whether `stage` is a plain assignment (`=`, `|=`, `op=`, `//=`) that yields exactly one value
+/// or raises: a path of static steps and keys that are one value
+/// ([`owned_state_expr_shape`]), and a right side or filter that is one too. The strictness over
+/// [`owned_assign_shape`] is the point: it admits a closed pipe by its head alone, whose later
+/// stages could fan out, and `//` and `as`, whose other side is anything.
+fn owned_one_value_assign_shape(stage: &Expr) -> bool {
+    fn path_shape(path: &Expr) -> bool {
+        match path {
+            Expr::Identity | Expr::Field(_) | Expr::Index { key: None, .. } => true,
+            Expr::Paren(inner) => path_shape(inner),
+            Expr::Pipe(stages) => stages.iter().all(path_shape),
+            Expr::IndexExpr { target, key } => path_shape(target) && owned_state_expr_shape(key),
+            _ => false,
+        }
+    }
+    match unwrap_paren(stage) {
+        Expr::Assign { path, value }
+        | Expr::CompoundAssign { path, value, .. }
+        | Expr::AlternativeAssign { path, value } => {
+            path_shape(path) && owned_state_expr_shape(value)
+        }
+        Expr::Update { path, filter } => path_shape(path) && owned_state_expr_shape(filter),
+        _ => false,
+    }
+}
+
+/// A pipe of assignments as a fold's UPDATE (`.l += [$x] | .n += 1`, #5285), applied to the moved
+/// state one stage after another, so a field the pipe extends is extended where it lies instead of
+/// being copied by a stage working on a clone of the state.
+///
+/// The first stage that declines hands the untouched state back, as a lone assignment does. A
+/// later stage that declines has an earlier one's write already in the state, which can no
+/// longer be handed back, so that stage runs on the evaluator against the state so far
+/// ([`owned_stage_on_evaluator`]): jq runs the stages in that order, none of them has an effect,
+/// and [`owned_one_value_assign_shape`] makes each one value or an error, so the answer and the
+/// error are the ones the evaluator would give for the whole pipe.
+#[inline(never)]
+fn owned_assign_pipe_step<S: EvalSemantics>(stages: &[Expr], mut state: OwnedValue) -> OwnedStep {
+    for (n, stage) in stages.iter().enumerate() {
+        let stage = unwrap_paren(stage);
+        match owned_assign_step::<S>(stage, &mut state) {
+            Some(Ok(())) => {}
+            Some(Err(error)) => return OwnedStep::Handled(Err(error)), // patchcov: coverage tolerate-line reason="reachable only on a genuine allocation failure, as in try_owned_assign_step (#5285)"
+            None if n == 0 => return OwnedStep::Declined(state),
+            None => match owned_stage_on_evaluator::<S>(stage, &state) {
+                Ok(next) => state = next,
+                Err(error) => return OwnedStep::Handled(Err(error)),
+            },
+        }
+    }
+    OwnedStep::Handled(Ok(state))
+}
+
+/// The one value `stage` yields on `state` through the evaluator, or the error it raises
+/// ([`owned_assign_pipe_step`]). Only a stage of [`owned_one_value_assign_shape`] reaches it, which
+/// has no other outcome.
+fn owned_stage_on_evaluator<S: EvalSemantics>(
+    stage: &Expr,
+    state: &OwnedValue,
+) -> Result<OwnedValue, EvalError> {
+    match eval_owned_expr_fork::<S>(stage, state, false, Reentry::REBUILT) {
+        (mut outputs, None) if outputs.len() == 1 => Ok(outputs.remove(0)),
+        (outputs, Some(Control::Error(error))) if outputs.is_empty() => Err(error),
+        _ => {
+            debug_assert!(
+                false, // patchcov: coverage tolerate-line reason="unreachable: a stage of owned_one_value_assign_shape yields exactly one value or one error (#5285)"
+                "an assignment stage of a pipe yielded neither one value nor one error" // patchcov: coverage tolerate-line reason="unreachable: same invariant as the `false` above (#5285)"
+            );
+            Err(EvalError::new(
+                "internal error: an assignment in a pipe yielded other than one value", // patchcov: coverage tolerate-line reason="unreachable: same invariant as the `false` above (#5285)"
+            ))
+        } // patchcov: coverage tolerate-line reason="unreachable: same invariant as the `false` above (#5285)"
     }
 }
 
@@ -151807,6 +151904,37 @@ mod share_audit_2999 {
             &json,
             "reduce .[] as $r ({}; .[$r.name] |= [.] + [$r.score])",
             &[(Kind::ArrayUnwrap, 1000)],
+        );
+    }
+
+    /// #5285: a pipe of assignments is applied to the moved state stage by stage, so the field
+    /// one of them extends is extended where it lies. Each of these used to run on a clone of the
+    /// state (`eval_owned_reindex_free`'s borrowed route), which copied the field every step.
+    #[test]
+    fn fold_pipe_of_assignments_copies_nothing_5285() {
+        let body: Vec<String> = (0..1000)
+            .map(|i| format!("{{\"name\":\"u{i}\",\"score\":{i}}}"))
+            .collect();
+        let json = format!("[{}]", body.join(",")).into_bytes();
+        for filter in [
+            "reduce .[] as $r (null; .l += [$r.score] | .n += 1)",
+            "reduce .[] as $r (null; .n += 1 | .l += [$r.score])",
+            "reduce .[] as $r ({}; .l += [$r.score] | .n += 1 | .m = (.n * 2))",
+            "reduce .[] as $r ({}; .i += 1 | .a += [.i])",
+            "reduce .[] as $r ({}; .o += {($r.name): $r.score} | .n += 1)",
+            "reduce .[] as $r ({}; .s += $r.name | .n += 1)",
+            "reduce .[] as $r (null; if $r.score > 5 then .l += [$r.score] | .n += 1 else . end)",
+            // A stage the in-place step declines runs on the evaluator against the state so far;
+            // the stages around it are still in place.
+            "reduce .[] as $r (null; .l += [$r.score] | .p[0] = 1 | .n += 1)",
+        ] {
+            assert_forced(&json, filter, &[]);
+        }
+        // Seeded by a literal: the one copy is step one's, where the field is still the program's.
+        assert_forced(
+            &json,
+            "reduce .[] as $r ({n: 0, l: []}; .l += [$r.score] | .n += 1)",
+            &[(Kind::ArrayMakeMut, 1)],
         );
     }
 
