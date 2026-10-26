@@ -34576,16 +34576,16 @@ fn test_jq_binary_op_success_paths_unaffected_1199() -> Result<()> {
 /// `test_arithmetic_mul_string_repetition_overflow_1612` (`src/jq/eval.rs`)
 /// -- covered by name there instead of duplicated here.
 ///
-/// Note real jq's own `nan * "ab"` returns `null` (verified: jq-1.7.1),
-/// not `""` -- but that's `(int)NaN` C-cast undefined behavior (platform-
-/// dependent; jq has no explicit NaN check here), not a deliberate
-/// contract, so succinctly's well-defined saturating-cast result (`""`) is
-/// intentionally not matched to it.
+/// Real jq's own `nan * "ab"` returns `null` (verified: jq-1.7.1), and so
+/// does succinctly's (#5300): jq tests `d < 0 || isnan(d)` *before* its
+/// cast, so NaN is a deliberate "negative" count, not `(int)NaN` undefined
+/// behavior. The `""` this test used to pin was Rust's saturating `as i64`
+/// turning NaN into `0`, which jq never does.
 #[test]
 fn test_jq_string_times_float_errors_cleanly_not_panics_1199() -> Result<()> {
     let (out, _, code) = run_jq_full(&["-cn", "(nan) * \"ab\""], None)?;
     assert_eq!(code, 0, "out: {out:?}");
-    assert_eq!(out.trim(), "\"\"");
+    assert_eq!(out.trim(), "null");
 
     let (out, _, code) = run_jq_full(&["-cn", "\"ab\" * (0 - infinite)"], None)?;
     assert_eq!(code, 0, "out: {out:?}");

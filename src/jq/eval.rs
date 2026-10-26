@@ -15199,7 +15199,7 @@ pub(super) fn arith_mul<S: EvalSemantics>(
                     Ok(OwnedValue::Float(a * b))
                 }
                 // String repetition: "ab" * 3 = "ababab". jq >= 1.7 yields ""
-                // for n == 0 and null only for n < 0 (jqlang/jq#1593). A
+                // for n == 0 and null only for n < 0 or NaN (jqlang/jq#1593). A
                 // `Float`-repr count (or a `NumberLiteral` carrying one)
                 // truncates toward zero first, matching real jq's own
                 // `intmax_t` cast (confirmed live: `2.5 * "ab"` -> `"abab"`,
@@ -15220,8 +15220,12 @@ pub(super) fn arith_mul<S: EvalSemantics>(
                     }
                     let n = match n_repr {
                         NumberRepr::Int(n) => n,
-                        // `as` truncates toward zero and saturates, matching
-                        // jq's intmax_t cast (mirrors `mod_floats` above).
+                        // jq tests the sign and NaN *before* truncating
+                        // (#5300): `-0.5` and `nan` are "negative" (null),
+                        // where truncating first would turn both into `0`
+                        // (`""`). `as` then truncates toward zero and
+                        // saturates, matching jq's own cast.
+                        NumberRepr::Float(f) if f < 0.0 || f.is_nan() => -1,
                         NumberRepr::Float(n) => n as i64,
                     };
                     if n < 0 && S::TAG == EvalTag::Yq {
