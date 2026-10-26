@@ -11,6 +11,7 @@ use crate::{run_yq_stdin, run_yq_stdin_with_stderr};
 const DUP: &str = "a: 1\na: 2\nb: [1, 2]\n";
 const FLOW: &str = "a: {b: 1, c: [1, 2]}\nl: [10, 20]\n";
 const MULTI: &str = "a: 1\n---\nb: 2\n---\nc: [1, 2]\n";
+const ALIAS: &str = "x: &a {p: 1}\ny:\n  q: *a\n";
 
 /// (document, filter, extra args, expected stdout).
 const ORACLE_ROWS: &[(&str, &str, &[&str], &str)] = &[
@@ -57,6 +58,18 @@ const ORACLE_ROWS: &[(&str, &str, &[&str], &str)] = &[
         &[],
         "1\n- 1.5 # n\n",
     ),
+    // `--no-doc` drops the separators and nothing else.
+    (MULTI, ".a, .b", &["-N"], "1\nnull\nnull\n2\nnull\nnull\n"),
+    // JSON input, JSON output.
+    (
+        "{\"a\":1,\"a\":2,\"b\":[1.50,2]}\n",
+        "., .b",
+        &["-p=json", "-o=json", "-I0"],
+        "{\"a\":1,\"a\":2,\"b\":[1.5,2]}\n[1.5,2]\n",
+    ),
+    // An alias keeps its `*`, as `.[]` and yq print it.
+    (ALIAS, ".x, .y", &[], "&a {p: 1}\nq: *a\n"),
+    (ALIAS, ".zz, .y", &[], "null\nq: *a\n"),
 ];
 
 #[test]
@@ -69,7 +82,19 @@ fn test_a_top_level_comma_streams_each_branch_5283() -> Result<()> {
     Ok(())
 }
 
-/// An error in any branch prints nothing for the others, not even a document separator, as before.
+/// `-e` reads the last output across the branches.
+#[test]
+fn test_exit_status_follows_the_last_branch_5283() -> Result<()> {
+    let (out, code) = run_yq_stdin(".a, .b", "a: null\nb: false\n", &["-e"])?;
+    assert_eq!((out.as_str(), code), ("null\nfalse\n", 1));
+    let (out, code) = run_yq_stdin(".a, .b", "a: 1\nb: false\n", &["-e"])?;
+    assert_eq!((out.as_str(), code), ("1\nfalse\n", 0));
+    Ok(())
+}
+
+/// An evaluation error in any branch prints nothing for the others, not even a document separator,
+/// as before. (A failure found while a later branch streams, an undecodable scalar, comes after the
+/// earlier branches were written, as it does for `.[]`.)
 #[test]
 fn test_an_error_in_one_branch_prints_nothing_5283() -> Result<()> {
     let doc = "a: [1]\n---\nb: 2\n";

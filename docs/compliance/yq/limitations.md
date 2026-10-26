@@ -1127,7 +1127,9 @@ The two write rows are the "every assignment" half of [#1344](https://github.com
 `[...]` around a cursor result (`[.[0]]`, [#2063](https://github.com/rust-works/succinctly/issues/2063)) is a further member that stays collapsed on stdout.
 A top-level comma stopped being a member in [#5283](https://github.com/rust-works/succinctly/issues/5283).
 When every branch is navigation (`., .b`, `.a, .zz`, `(.a, .b), .l`), stdout streams the branches one at a time through the M2 writers, so a repeated key and a node's flow style survive as they do for each branch alone.
-A branch that errors prints nothing for the others, and a document separator is written once, before the first branch that prints.
+A branch that errors during evaluation prints nothing for the others, and a document separator is written once, before the first branch that prints.
+A failure found while a later branch streams (an undecodable scalar in a document yq rejects whole) comes after the earlier branches were written, as it does for `.[]` (#1615).
+A branch that answers an alias prints `*a`, as `.[]` and yq do, where the DOM route's per-result soundness rule expanded it (`.x, .y` on `x: &a {p: 1} / y: {q: *a}`).
 `-C`, `-0`, `-i`, `-s`, `--eval-all`, `-P` and a branch that is not navigation (`.a // .b`, `.a, (.b | length)`) keep the DOM route and its collapse.
 All of them close together once `OwnedValue::Object` can hold a repeated key, or the route can carry a cursor.
 The wiring fault the issue's triage also named no longer reproduces: `-P 'map(.)'`, `-P 'sort'` and `-P 'reverse'` print `99999999999999999999` as yq does, where the triage saw `1e+20` (`the_dom_route_keeps_a_large_integers_spelling_through_a_lazy_seq_2186` pins it).

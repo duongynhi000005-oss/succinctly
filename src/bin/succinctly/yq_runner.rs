@@ -9424,18 +9424,46 @@ fn discard_yq_partial_prefix<V: DocumentValue>(result: GenericResult<V>) -> Gene
     }
 }
 
-/// The results of a top-level `,`'s branches, in order, or only the first failure (#5283).
-///
-/// A query that fails in any branch prints nothing for the others (#2392, #4856), so a branch
-/// that errored is streamed alone and its diagnostic is the whole output.
-fn comma_branch_results<V: DocumentValue>(
-    mut results: Vec<GenericResult<V>>,
-) -> Vec<GenericResult<V>> {
-    let failed = results.iter().position(GenericResult::is_failure);
-    match failed {
-        Some(at) => vec![results.swap_remove(at)],
-        None => results,
+/// What a streamed query's branches answered, in order (#5283): the one result of a query that is
+/// not a comma (no allocation, this is the per-document hot path), or those of a top-level comma.
+enum BranchResults<V: DocumentValue> {
+    One(Option<GenericResult<V>>),
+    Many(std::vec::IntoIter<GenericResult<V>>),
+}
+
+impl<V: DocumentValue> Iterator for BranchResults<V> {
+    type Item = GenericResult<V>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::One(result) => result.take(),
+            Self::Many(results) => results.next(),
+        }
     }
+}
+
+/// Evaluate each of `branches` against `cursor` and collapse a partial failure the way a lone
+/// query does (#2392).
+///
+/// A comma that fails in any branch prints nothing for the others (#2392, #4856), so the first
+/// failed branch is the only result streamed and its diagnostic is the whole output. That covers a
+/// failure the evaluation raised; one found while a later branch streams (an undecodable scalar)
+/// comes after the earlier branches were written, as it does for `.[]`.
+fn stream_branch_results<C: DocumentCursor + Copy>(
+    branches: &[&Expr],
+    cursor: C,
+) -> BranchResults<C::Value> {
+    let eval = |branch: &Expr| {
+        discard_yq_partial_prefix(eval_with_cursor_using::<YqSemantics, _>(branch, cursor))
+    };
+    if let [only] = branches {
+        return BranchResults::One(Some(eval(only)));
+    }
+    let mut results: Vec<_> = branches.iter().map(|branch| eval(branch)).collect();
+    if let Some(at) = results.iter().position(GenericResult::is_failure) {
+        results = vec![results.swap_remove(at)];
+    }
+    BranchResults::Many(results.into_iter())
 }
 
 /// Main entry point for the yq command.
@@ -9848,16 +9876,15 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
     // key that yq prints (`., .b` on `a: 1 / a: 2`) and raising on a colliding undecodable key
     // that `.` echoes (#2645). Stdout only, uncolored and not NUL-terminated: the in-place and slurp gates
     // keep theirs, and `-C`'s buffered colorizer and `-0`'s lazy separator are tuned to the DOM route.
-    let is_m2_streamable_comma = terminator_from_config(&output_config) != Terminator::Nul
-        && !output_config.use_color
-        && top_level_comma_branches(&program.expr)
-            .is_some_and(|branches| branches.into_iter().all(can_use_m2_streaming));
+    let comma_branches = top_level_comma_branches(&program.expr).filter(|branches| {
+        terminator_from_config(&output_config) != Terminator::Nul
+            && !output_config.use_color
+            && branches.iter().all(|branch| can_use_m2_streaming(branch))
+    });
+    let is_m2_streamable_comma = comma_branches.is_some();
     // What each `stream_cursor!` evaluates and streams, in order: the branches of a streamed
     // comma, each as a query of its own (a node keeps what its cursor carries), else the query.
-    let stream_branches: Vec<&Expr> = match top_level_comma_branches(&program.expr) {
-        Some(branches) if is_m2_streamable_comma => branches,
-        _ => vec![&program.expr],
-    };
+    let stream_branches: Vec<&Expr> = comma_branches.unwrap_or_else(|| vec![&program.expr]);
     let reorders_root_sequence = reorders_a_sequence(&program.expr);
     // #2276 code review (found live against this exact binary, on top of
     // #2262): `any_input_is_json` -- the same run-wide boolean #978
@@ -10248,16 +10275,7 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                     // #5283: a streamed comma is its branches, one `stream_cursor!` result each; only the
                     // first that produces output may write the document's `---`.
                     let mut doc_has_output = false;
-                    let branch_results = comma_branch_results(
-                        stream_branches
-                            .iter()
-                            .map(|branch| {
-                                discard_yq_partial_prefix(eval_with_cursor_using::<YqSemantics, _>(
-                                    branch, $cursor,
-                                ))
-                            })
-                            .collect(),
-                    );
+                    let branch_results = stream_branch_results(&stream_branches, $cursor);
                     for result in branch_results {
                         // A throwaway flag once the document has output: `emit_yaml_doc_separator` sets it.
                         let mut comma_dummy = false;
@@ -10271,103 +10289,103 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                         let produces_output = result.produces_output()
                             && !(is_m2_streamable_comma && result.is_failure());
                         doc_has_output |= produces_output;
-                    // `produces_output` is an exhaustive match on
-                    // `GenericResult`, not a hand-maintained exclusion
-                    // list — a halt/halt_error (#791) with no prior
-                    // output (`GenericResult::Halt`) answers `false`
-                    // there; an output-bearing halt
-                    // (`GenericResult::Partial`) answers `true`.
-                    // #1709: see the identity branch's own comment above --
-                    // `result.produces_output()` predicts the STRUCTURE of
-                    // the result, not whether its first NUL-checked result
-                    // will actually survive, so a NUL-separated document's
-                    // separator has to be decided lazily too. Still gated
-                    // on `result.produces_output()` itself (#1709 code
-                    // review): a document producing zero results must
-                    // never offer a separator opportunity at all, colored
-                    // or not -- the color/`Buffered` arm of
-                    // `stream_maybe_colored` has no empty-buffer guard of
-                    // its own the way the non-color `NulChecked` arm does,
-                    // so an ungated `Some(..)` here wrote a stray `---`
-                    // around an empty middle document even when nothing
-                    // failed the NUL check at all. Live-verified regression:
-                    // `-0 --colors 'select(.a != 2)'` over three documents
-                    // whose middle one matches nothing.
-                    let nul_separator = if terminator == Terminator::Nul {
-                        produces_output.then_some(DocSeparatorArgs {
-                            doc_streamed: doc_streamed_ref,
-                            no_doc: $output_config.no_doc,
-                        })
-                    } else {
-                        emit_yaml_doc_separator(
+                        // `produces_output` is an exhaustive match on
+                        // `GenericResult`, not a hand-maintained exclusion
+                        // list — a halt/halt_error (#791) with no prior
+                        // output (`GenericResult::Halt`) answers `false`
+                        // there; an output-bearing halt
+                        // (`GenericResult::Partial`) answers `true`.
+                        // #1709: see the identity branch's own comment above --
+                        // `result.produces_output()` predicts the STRUCTURE of
+                        // the result, not whether its first NUL-checked result
+                        // will actually survive, so a NUL-separated document's
+                        // separator has to be decided lazily too. Still gated
+                        // on `result.produces_output()` itself (#1709 code
+                        // review): a document producing zero results must
+                        // never offer a separator opportunity at all, colored
+                        // or not -- the color/`Buffered` arm of
+                        // `stream_maybe_colored` has no empty-buffer guard of
+                        // its own the way the non-color `NulChecked` arm does,
+                        // so an ungated `Some(..)` here wrote a stray `---`
+                        // around an empty middle document even when nothing
+                        // failed the NUL check at all. Live-verified regression:
+                        // `-0 --colors 'select(.a != 2)'` over three documents
+                        // whose middle one matches nothing.
+                        let nul_separator = if terminator == Terminator::Nul {
+                            produces_output.then_some(DocSeparatorArgs {
+                                doc_streamed: doc_streamed_ref,
+                                no_doc: $output_config.no_doc,
+                            })
+                        } else {
+                            emit_yaml_doc_separator(
+                                $writer,
+                                doc_streamed_ref,
+                                produces_output,
+                                $output_config.no_doc,
+                                terminator,
+                            )?;
+                            None
+                        };
+                        // #1708: the per-result terminator write runs *inside*
+                        // this buffered render callback, so a real terminator
+                        // byte here would become part of what gets colorized --
+                        // record the result's boundary instead when colorizing,
+                        // so `colorize_yaml` can place the real terminator
+                        // itself afterward, correctly relative to whatever
+                        // color span is open at each result boundary. The
+                        // non-colored path (`$writer` written directly, no
+                        // buffering) is unaffected and still writes the real
+                        // terminator either way.
+                        // #4926: a sort/reverse/unique of the document's own sequence keeps the
+                        // comment block above it, which the items' streaming has no node to read.
+                        let reordered_head =
+                            reorders_root_sequence && matches!(result, GenericResult::LazySeq(_));
+                        let stats = stream_maybe_colored(
                             $writer,
-                            doc_streamed_ref,
-                            produces_output,
-                            $output_config.no_doc,
+                            $use_color,
                             terminator,
+                            nul_separator,
+                            |s, boundaries| colorize_yaml(s, terminator, boundaries),
+                            |out| {
+                                if reordered_head {
+                                    $cursor
+                                        .stream_reordered_sequence_head(out)
+                                        .map_err(StreamFailure::from)?;
+                                }
+                                result
+                                    .stream_yaml::<_, YqSemantics>(out, yaml_indent, sort_keys, |w| {
+                                        w.write_result_terminator(terminator)
+                                    })
+                                    .map_err(StreamFailure::from)
+                            },
                         )?;
-                        None
-                    };
-                    // #1708: the per-result terminator write runs *inside*
-                    // this buffered render callback, so a real terminator
-                    // byte here would become part of what gets colorized --
-                    // record the result's boundary instead when colorizing,
-                    // so `colorize_yaml` can place the real terminator
-                    // itself afterward, correctly relative to whatever
-                    // color span is open at each result boundary. The
-                    // non-colored path (`$writer` written directly, no
-                    // buffering) is unaffected and still writes the real
-                    // terminator either way.
-                    // #4926: a sort/reverse/unique of the document's own sequence keeps the
-                    // comment block above it, which the items' streaming has no node to read.
-                    let reordered_head =
-                        reorders_root_sequence && matches!(result, GenericResult::LazySeq(_));
-                    let stats = stream_maybe_colored(
-                        $writer,
-                        $use_color,
-                        terminator,
-                        nul_separator,
-                        |s, boundaries| colorize_yaml(s, terminator, boundaries),
-                        |out| {
-                            if reordered_head {
-                                $cursor
-                                    .stream_reordered_sequence_head(out)
-                                    .map_err(StreamFailure::from)?;
+                        // `GenericResult::stream_yaml` reports a decode failure
+                        // through `stats.error`, not by failing, so the outer
+                        // `Result` is only ever `Ok` here. Handled rather than
+                        // `unwrap_or_default()`ed anyway (#1615): defaulting would
+                        // discard the diagnostic and exit 0, re-creating the exact
+                        // silent swallow this change closes, if a future streamer
+                        // ever did return `Decode` from this arm.
+                        let stats = match stats {
+                            Ok(stats) => stats,
+                            Err(e) => {
+                                report_stream_decode_failure(&mut sink, &e);
+                                stream_truncated.set(true);
+                                Default::default()
                             }
-                            result
-                                .stream_yaml::<_, YqSemantics>(out, yaml_indent, sort_keys, |w| {
-                                    w.write_result_terminator(terminator)
-                                })
-                                .map_err(StreamFailure::from)
-                        },
-                    )?;
-                    // `GenericResult::stream_yaml` reports a decode failure
-                    // through `stats.error`, not by failing, so the outer
-                    // `Result` is only ever `Ok` here. Handled rather than
-                    // `unwrap_or_default()`ed anyway (#1615): defaulting would
-                    // discard the diagnostic and exit 0, re-creating the exact
-                    // silent swallow this change closes, if a future streamer
-                    // ever did return `Decode` from this arm.
-                    let stats = match stats {
-                        Ok(stats) => stats,
-                        Err(e) => {
-                            report_stream_decode_failure(&mut sink, &e);
+                        };
+                        any_truthy |= stats.any_truthy;
+                        absorb_stream_stats(&mut sink, &stats);
+                        // #1615: an evaluated result can be a *container* holding
+                        // an undecodable scalar, in which case the cursor stream
+                        // is already part-written when it fails -- same truncation
+                        // the identity branches produce, so it needs the same
+                        // stop. Gated on `truncated`, never on `stats.error`: an
+                        // ordinary uncaught error writes nothing to `out` and must
+                        // still continue to the next document (#355).
+                        if stats.truncated {
                             stream_truncated.set(true);
-                            Default::default()
                         }
-                    };
-                    any_truthy |= stats.any_truthy;
-                    absorb_stream_stats(&mut sink, &stats);
-                    // #1615: an evaluated result can be a *container* holding
-                    // an undecodable scalar, in which case the cursor stream
-                    // is already part-written when it fails -- same truncation
-                    // the identity branches produce, so it needs the same
-                    // stop. Gated on `truncated`, never on `stats.error`: an
-                    // ordinary uncaught error writes nothing to `out` and must
-                    // still continue to the next document (#355).
-                    if stats.truncated {
-                        stream_truncated.set(true);
-                    }
                         if stream_truncated.get() {
                             break;
                         }
@@ -10431,87 +10449,78 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                     // `None`), so there's no ordering constraint here beyond
                     // preceding `stream_json` itself.
                     // #5283: see the YAML arm above.
-                    let branch_results = comma_branch_results(
-                        stream_branches
-                            .iter()
-                            .map(|branch| {
-                                discard_yq_partial_prefix(eval_with_cursor_using::<YqSemantics, _>(
-                                    branch, $cursor,
-                                ))
-                            })
-                            .collect(),
-                    );
+                    let branch_results = stream_branch_results(&stream_branches, $cursor);
                     for result in branch_results {
-                    let stats = stream_maybe_colored(
-                        $writer,
-                        $use_color,
-                        terminator,
-                        None,
-                        |s, _boundaries| output::colorize_json(s, &ColorScheme::default()),
-                        |sink| {
-                            json_ascii!($output_config.ascii_output, sink, |out| {
-                                result
-                                    .stream_json::<_, YqSemantics>(
-                                        out,
-                                        json_indent,
-                                        sort_keys,
-                                        JsonConvention::Preserve,
-                                        |w| {
-                                            // #1709: `--color`'s `Buffered` mode
-                                            // needs the raw terminator byte
-                                            // written straight into its buffer
-                                            // (JSON's own colorizer re-lexes
-                                            // that unmodified, unlike YAML's
-                                            // boundary-based one -- see
-                                            // `stream_maybe_colored`'s own
-                                            // comment on this). `write_result_
-                                            // terminator` would silently drop
-                                            // it there. Every other mode
-                                            // (`Direct`, `NulChecked`) is
-                                            // unaffected either way -- `Direct`'s
-                                            // own arm is exactly `terminator.
-                                            // write_fmt(self)`, and `NulChecked`
-                                            // needs the dispatch to trigger its
-                                            // per-result flush. `dispatch_
-                                            // result_terminator` (not
-                                            // `write_result_terminator`
-                                            // directly) since `--ascii-output`
-                                            // wraps `w` in `AsciiEscapeWriter`
-                                            // here, which has no
-                                            // `ColorSink`-specific methods of
-                                            // its own.
-                                            if $use_color {
-                                                terminator.write_fmt(w)
-                                            } else {
-                                                w.dispatch_result_terminator(terminator)
-                                            }
-                                        },
-                                    )
-                                    .map_err(StreamFailure::from)
-                            })
-                        },
-                    )?;
-                    // See the YAML branch above (#1615).
-                    let stats = match stats {
-                        Ok(stats) => stats,
-                        Err(e) => {
-                            report_stream_decode_failure(&mut sink, &e);
+                        let stats = stream_maybe_colored(
+                            $writer,
+                            $use_color,
+                            terminator,
+                            None,
+                            |s, _boundaries| output::colorize_json(s, &ColorScheme::default()),
+                            |sink| {
+                                json_ascii!($output_config.ascii_output, sink, |out| {
+                                    result
+                                        .stream_json::<_, YqSemantics>(
+                                            out,
+                                            json_indent,
+                                            sort_keys,
+                                            JsonConvention::Preserve,
+                                            |w| {
+                                                // #1709: `--color`'s `Buffered` mode
+                                                // needs the raw terminator byte
+                                                // written straight into its buffer
+                                                // (JSON's own colorizer re-lexes
+                                                // that unmodified, unlike YAML's
+                                                // boundary-based one -- see
+                                                // `stream_maybe_colored`'s own
+                                                // comment on this). `write_result_
+                                                // terminator` would silently drop
+                                                // it there. Every other mode
+                                                // (`Direct`, `NulChecked`) is
+                                                // unaffected either way -- `Direct`'s
+                                                // own arm is exactly `terminator.
+                                                // write_fmt(self)`, and `NulChecked`
+                                                // needs the dispatch to trigger its
+                                                // per-result flush. `dispatch_
+                                                // result_terminator` (not
+                                                // `write_result_terminator`
+                                                // directly) since `--ascii-output`
+                                                // wraps `w` in `AsciiEscapeWriter`
+                                                // here, which has no
+                                                // `ColorSink`-specific methods of
+                                                // its own.
+                                                if $use_color {
+                                                    terminator.write_fmt(w)
+                                                } else {
+                                                    w.dispatch_result_terminator(terminator)
+                                                }
+                                            },
+                                        )
+                                        .map_err(StreamFailure::from)
+                                })
+                            },
+                        )?;
+                        // See the YAML branch above (#1615).
+                        let stats = match stats {
+                            Ok(stats) => stats,
+                            Err(e) => {
+                                report_stream_decode_failure(&mut sink, &e);
+                                stream_truncated.set(true);
+                                Default::default()
+                            }
+                        };
+                        any_truthy |= stats.any_truthy;
+                        absorb_stream_stats(&mut sink, &stats);
+                        // #1615: an evaluated result can be a *container* holding
+                        // an undecodable scalar, in which case the cursor stream
+                        // is already part-written when it fails -- same truncation
+                        // the identity branches produce, so it needs the same
+                        // stop. Gated on `truncated`, never on `stats.error`: an
+                        // ordinary uncaught error writes nothing to `out` and must
+                        // still continue to the next document (#355).
+                        if stats.truncated {
                             stream_truncated.set(true);
-                            Default::default()
                         }
-                    };
-                    any_truthy |= stats.any_truthy;
-                    absorb_stream_stats(&mut sink, &stats);
-                    // #1615: an evaluated result can be a *container* holding
-                    // an undecodable scalar, in which case the cursor stream
-                    // is already part-written when it fails -- same truncation
-                    // the identity branches produce, so it needs the same
-                    // stop. Gated on `truncated`, never on `stats.error`: an
-                    // ordinary uncaught error writes nothing to `out` and must
-                    // still continue to the next document (#355).
-                    if stats.truncated {
-                        stream_truncated.set(true);
-                    }
                         if stream_truncated.get() {
                             break;
                         }

@@ -29481,6 +29481,10 @@ fn test_yaml_comma_keeps_anchor_marks_1361() -> Result<()> {
     let input = "x: &a {p: 1}\ny:\n  q: *a\n";
     let (via_iterate, code) = run_yq_stdin(".[]", input, &[])?;
     assert_eq!(code, 0);
+    // The DOM route (`--arg` forces it) still expands an alias whose `&a` is in another result.
+    let (via_dom, code) = run_yq_stdin(".[]", input, &["--arg", "z", "1"])?;
+    assert_eq!(code, 0);
+    assert_eq!(via_dom, "&a {p: 1}\nq:\n  p: 1\n");
     // The second result keeps its `*a`, as `.[]` and yq print it. The comma streams its branches
     // (#5283) and so no longer takes the DOM route, which expanded an alias whose `&a` is in
     // another result (the per-result soundness rule, still pinned by the `-P` row below).
