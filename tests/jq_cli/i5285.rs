@@ -131,6 +131,22 @@ fn test_pipe_of_assignments_folds_answer_as_jq_5285() -> Result<()> {
             r#"{"n":1,"k":"w"}"#,
         ),
         (
+            "reduce .[] as $x ({n:0}; .n += 1 | to_entries | from_entries)",
+            r#"{"n":5}"#,
+        ),
+        (
+            "reduce .[] as $x ({n:0}; .n += 1 | .k = ($x.tags | .[]?))",
+            r#"{"n":1,"k":"w"}"#,
+        ),
+        (
+            "reduce .[] as $x ({n:0}; .n += 1 | .k = ($x.name | ascii_upcase | [., .]))",
+            r#"{"n":5,"k":["D","D"]}"#,
+        ),
+        (
+            "reduce .[] as $x ({n:0}; .n += 1 | .k //= (1 | .,2))",
+            r#"{"n":5,"k":2}"#,
+        ),
+        (
             "reduce .[] as $x ({n:0}; .n += 1 | .a = (1,2))",
             r#"{"n":5,"a":2}"#,
         ),

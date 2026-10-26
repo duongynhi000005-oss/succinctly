@@ -12255,9 +12255,7 @@ fn owned_assign_pipe_stages<S: EvalSemantics>(expr: &Expr) -> Option<&[Expr]> {
     let (EvalTag::Jq, Expr::Pipe(stages)) = (S::TAG, unwrap_paren(expr)) else {
         return None;
     };
-    let [first, rest @ ..] = stages.as_slice() else {
-        return None;
-    };
+    let (first, rest) = stages.split_first()?;
     (is_owned_assign(unwrap_paren(first))
         && !rest.is_empty()
         && rest.iter().all(owned_one_value_assign_shape)
@@ -12328,17 +12326,20 @@ fn owned_stage_on_evaluator<S: EvalSemantics>(
     match eval_owned_expr_fork::<S>(stage, state, false, Reentry::REBUILT) {
         (mut outputs, None) if outputs.len() == 1 => Ok(outputs.remove(0)),
         (outputs, Some(Control::Error(error))) if outputs.is_empty() => Err(error),
-        _ => {
-            debug_assert!(
-                false, // patchcov: coverage tolerate-line reason="unreachable: a stage of owned_one_value_assign_shape yields exactly one value or one error (#5285)"
-                "an assignment stage of a pipe yielded neither one value nor one error" // patchcov: coverage tolerate-line reason="unreachable: same invariant as the `false` above (#5285)"
-            );
-            Err(EvalError::new(
-                "internal error: an assignment in a pipe yielded other than one value", // patchcov: coverage tolerate-line reason="unreachable: same invariant as the `false` above (#5285)"
-            ))
-        } // patchcov: coverage tolerate-line reason="unreachable: same invariant as the `false` above (#5285)"
+        _ => Err(unreachable_owned_pipe_stage()), // patchcov: coverage tolerate-line reason="unreachable: a stage of owned_one_value_assign_shape yields exactly one value or one error (#5285)"
     }
 }
+
+/// The error [`owned_stage_on_evaluator`] reports if a stage of [`owned_one_value_assign_shape`]
+/// ever yields other than one value or one error.
+#[cold]
+fn unreachable_owned_pipe_stage() -> EvalError {
+    debug_assert!(
+        false, // patchcov: coverage tolerate-line reason="unreachable: a stage of owned_one_value_assign_shape yields exactly one value or one error, which is what the caller's other arms answer (#5285)"
+        "an assignment stage of a pipe yielded neither one value nor one error" // patchcov: coverage tolerate-line reason="unreachable: same invariant as the `false` above (#5285)"
+    );
+    EvalError::new("internal error: pipe stage yielded other than one value") // patchcov: coverage tolerate-line reason="unreachable: same invariant as the `false` above (#5285)"
+} // patchcov: coverage tolerate-line reason="unreachable: the whole function body above is dead by the same invariant (#5285)"
 
 pub(crate) fn eval_owned_reindex_free<S: EvalSemantics>(
     expr: &Expr,
