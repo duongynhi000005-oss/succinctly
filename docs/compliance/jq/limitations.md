@@ -593,9 +593,6 @@ front of gaps that were already there behind a parenthesis:
   write is dropped; `and`/`or`/unary minus in front of a destructuring `as` reach
   [#3289](https://github.com/rust-works/succinctly/issues/3289). Both spellings behaved
   the same way behind parentheses on `main`.
-- **`//` against assignment** (the remaining divergence in
-  [the language reference](../../reference/jq-language.md#operator-precedence)) now also
-  shows inside a binding body on the right of an assignment: `.a = 1 as $x | .a // 1 %= 2`.
 
 Costs and gaps this change leaves:
 

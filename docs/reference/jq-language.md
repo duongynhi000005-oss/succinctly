@@ -400,16 +400,16 @@ and the yq-mode captures in `test_owned_identity_rules_match_yq_2416` (`tests/yq
 
 Loosest first, matching jq's `parser.y`:
 
-| Level | Operators                             | Notes                                              |
-|-------|---------------------------------------|----------------------------------------------------|
-| 1     | `\|`                                  | Loosest. Each stage is a comma list.               |
-| 2     | `,`                                   | Binds tighter than `\|`: `a,b \| f` is `(a,b) \| f`. |
-| 3     | `as`                                  | Binds the `Term` before it; body runs to the end.  |
-| 4     | `=` `\|=` `+=` `-=` `*=` `/=` `%=` `//=` | See divergence 1 below.                         |
-| 5     | `//`                                  | See divergence 1 below.                            |
-| 6     | `or`, `and`                           |                                                    |
-| 7     | `==` `!=` `<` `<=` `>` `>=`           |                                                    |
-| 8     | `+` `-`, then `*` `/` `%`             | Tightest.                                          |
+| Level | Operators                                | Notes                                                |
+|-------|------------------------------------------|------------------------------------------------------|
+| 1     | `\|`                                     | Loosest. Each stage is a comma list.                 |
+| 2     | `,`                                      | Binds tighter than `\|`: `a,b \| f` is `(a,b) \| f`. |
+| 3     | `as`                                     | Binds the `Term` before it; body runs to the end.    |
+| 4     | `//`                                     | Looser than assignment in jq mode (#5293).           |
+| 5     | `=` `\|=` `+=` `-=` `*=` `/=` `%=` `//=` | Nonassociative. Tighter than `//` in jq mode.        |
+| 6     | `or`, `and`                              |                                                      |
+| 7     | `==` `!=` `<` `<=` `>` `>=`              |                                                      |
+| 8     | `+` `-`, then `*` `/` `%`                | Tightest.                                            |
 
 `1,2,3 | . * 2` is therefore `(1,2,3) | . * 2` → `2 4 6`, and
 `1,2 as $x | $x | .+10` is `1, (2 as $x | $x | .+10)` → `1 12` (#462).
@@ -437,13 +437,12 @@ operator after a binding's body is a syntax error (`1 as $x | $x == 1 == 1`), as
 jq. **yq mode binds the whole left expression**, as real yq does: `1 + 2 as $x | [$x]` is
 `(1 + 2) as $x | [$x]` and `2 * 1 as $x | $x + 10` is `12`.
 
-One precedence divergence from jq remains:
-
-1. **`//` binds tighter than assignment, where jq has it looser.** jq declares
-   `%right "//"` before the assignment operators, so `.a = 1 // 2` is
-   `(.a = 1) // 2`; here it is `.a = (1 // 2)`. Since #3397 puts a binding's body on
-   the right of an assignment, this also shows inside that body:
-   `.a = 1 as $x | .a // 1 %= 2`.
+**`//` against assignment** (#5293). jq declares `%right "//"` before the assignment operators in
+`parser.y`, so `//` is the looser of the two and an assignment's sides stop before it:
+`.b = .a // "d"` is `(.b = .a) // "d"`, and on `{"a":null}` that is `{"a":null,"b":null}`.
+`.a // .b = 1` is `.a // (.b = 1)`. `succinctly jq` follows jq.
+**yq mode keeps yq's own order**, where `//` (precedence 42) is tighter than `=` (40):
+`.b = .a // "d"` is `.b = (.a // "d")` and answers `{"a":null,"b":"d"}`, as real yq v4.53.3 does.
 
 ## Known Limitations
 

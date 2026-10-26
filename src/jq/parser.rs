@@ -8499,7 +8499,18 @@ impl<'a> Parser<'a> {
 
     /// Parse alternative expressions: `expr // expr`
     fn parse_alternative(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_or()?;
+        let left = self.parse_or()?;
+        self.parse_alternative_chain(left, Self::parse_or)
+    }
+
+    /// The `// operand` links after `left`, each operand parsed by `operand` (the level one
+    /// binds tighter than `//`: [`Self::parse_or`] in yq's order, the assignment level in jq's,
+    /// [`Self::parse_assignment`]). `//=` is not a link: it is an assignment operator.
+    fn parse_alternative_chain(
+        &mut self,
+        mut left: Expr,
+        operand: fn(&mut Self) -> Result<Expr, ParseError>,
+    ) -> Result<Expr, ParseError> {
         // Each iteration wraps `left` in another node, so this chain's own
         // length is AST depth even though the loop never recurses (#1156).
         let mut chain_depth = 0usize;
@@ -8507,17 +8518,13 @@ impl<'a> Parser<'a> {
         loop {
             self.skip_ws();
             // Check for // but not //= (alternative assignment)
-            let peek3 = self.peek_str(3);
-            if peek3 == "//=" {
-                break;
-            }
-            if self.peek_str(2) != "//" {
+            if self.peek_str(3) == "//=" || self.peek_str(2) != "//" {
                 break;
             }
             self.next();
             self.next();
             self.skip_ws();
-            let right = self.parse_or()?;
+            let right = operand(self)?;
             chain_depth += 1;
             self.check_expr_nesting(chain_depth)?;
             left = Expr::Alternative(Box::new(left), Box::new(right));
@@ -8599,10 +8606,36 @@ impl<'a> Parser<'a> {
         matched
     }
 
-    /// Parse assignment expressions: `path = value`, `path |= filter`, `path += value`, etc.
-    /// Assignment has higher precedence than pipe, lower than alternative.
+    /// The level between `,` and the assignment operators, which the two reference tools rank
+    /// the opposite way round (ADR-0018 rule 2: mode decides, #5293).
+    ///
+    /// **jq** declares `%right "//"` before `%nonassoc '=' SETPIPE ...` in `parser.y`, so `//` is
+    /// the *looser* of the two: `.b = .a // "d"` is `(.b = .a) // "d"`, and an assignment's two
+    /// sides stop before a `//`. **yq** gives `//` precedence 42 and `=` 40
+    /// (`pkg/yqlib/operation.go`, v4.53.3), so there `//` is tighter and `.b = .a // "d"` is
+    /// `.b = (.a // "d")`.
     fn parse_assignment(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_alternative()?;
+        if self.mode != ParserMode::Jq {
+            return self.parse_assignment_level();
+        }
+        let left = self.parse_assignment_level()?;
+        self.parse_alternative_chain(left, Self::parse_assignment_level)
+    }
+
+    /// An operand of an assignment operator, or its left side: in jq mode everything tighter than
+    /// `//`, which ends it ([`Self::parse_assignment`]); in yq mode an alternative-level expression.
+    fn parse_assignment_operand(&mut self) -> Result<Expr, ParseError> {
+        if self.mode == ParserMode::Jq {
+            self.parse_or()
+        } else {
+            self.parse_alternative()
+        }
+    }
+
+    /// Parse assignment expressions: `path = value`, `path |= filter`, `path += value`, etc.
+    /// Assignment has higher precedence than pipe; against `//` see [`Self::parse_assignment`].
+    fn parse_assignment_level(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_assignment_operand()?;
         self.skip_ws();
 
         // yq metadata-assignment grammar (#798) -- must be tried before the
@@ -8638,7 +8671,7 @@ impl<'a> Parser<'a> {
             self.next(); // |
             self.next(); // =
             self.skip_ws();
-            let filter = self.parse_alternative()?;
+            let filter = self.parse_assignment_operand()?;
             return Ok(Expr::Update {
                 path: Box::new(left),
                 filter: Box::new(filter),
@@ -8651,7 +8684,7 @@ impl<'a> Parser<'a> {
             self.next(); // /
             self.next(); // =
             self.skip_ws();
-            let value = self.parse_alternative()?;
+            let value = self.parse_assignment_operand()?;
             return Ok(Expr::AlternativeAssign {
                 path: Box::new(left),
                 value: Box::new(value),
@@ -8671,7 +8704,7 @@ impl<'a> Parser<'a> {
                 MergeFlags::default()
             };
             self.skip_ws();
-            let value = self.parse_alternative()?;
+            let value = self.parse_assignment_operand()?;
             return Ok(Expr::CompoundAssign {
                 op: AssignOp::Mul(flags),
                 path: Box::new(left),
@@ -8694,7 +8727,7 @@ impl<'a> Parser<'a> {
                 self.next(); // op char
                 self.next(); // =
                 self.skip_ws();
-                let value = self.parse_alternative()?;
+                let value = self.parse_assignment_operand()?;
                 return Ok(Expr::CompoundAssign {
                     op,
                     path: Box::new(left),
@@ -8708,7 +8741,7 @@ impl<'a> Parser<'a> {
         if self.peek() == Some('=') && self.peek_str(2) != "==" {
             self.next(); // =
             self.skip_ws();
-            let value = self.parse_alternative()?;
+            let value = self.parse_assignment_operand()?;
             return Ok(Expr::Assign {
                 path: Box::new(left),
                 value: Box::new(value),
@@ -11445,6 +11478,63 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// #5293: jq ranks `//` *looser* than the assignment operators (`%right "//"` before
+    /// `%nonassoc '=' ...` in `parser.y`) and yq ranks it tighter (42 against 40), so the same
+    /// text is two trees.
+    #[test]
+    fn alternative_against_assignment_follows_the_mode_5293() {
+        fn is_assignment(expr: &Expr) -> bool {
+            matches!(
+                expr,
+                Expr::Assign { .. }
+                    | Expr::Update { .. }
+                    | Expr::CompoundAssign { .. }
+                    | Expr::AlternativeAssign { .. }
+            )
+        }
+        for source in [
+            ".b = .a // 1",
+            ".b |= .a // 1",
+            ".b += .a // 1",
+            ".b //= .a // 1",
+        ] {
+            // jq: `(assignment) // 1`.
+            let jq = parse_with_mode(source, ParserMode::Jq).unwrap();
+            assert!(
+                matches!(&jq, Expr::Alternative(left, right)
+                    if is_assignment(left) && matches!(right.as_ref(), Expr::Literal(_))),
+                "jq: `{source}`: {jq:?}"
+            );
+            // yq: the assignment's value is the `//`.
+            let yq = parse_with_mode(source, ParserMode::Yq).unwrap();
+            assert!(
+                matches!(&yq, Expr::Assign { value, .. }
+                    | Expr::CompoundAssign { value, .. }
+                    | Expr::AlternativeAssign { value, .. }
+                    | Expr::Update { filter: value, .. }
+                    if matches!(value.as_ref(), Expr::Alternative(..))),
+                "yq: `{source}`: {yq:?}"
+            );
+        }
+        // The left side of an assignment stops before a `//` too, and a chain of `//` stays one.
+        let jq = parse_with_mode(".a // .b = 1", ParserMode::Jq).unwrap();
+        assert!(
+            matches!(&jq, Expr::Alternative(_, right) if is_assignment(right)),
+            "{jq:?}"
+        );
+        let jq = parse_with_mode(".a = 1 // 2 // 3", ParserMode::Jq).unwrap();
+        assert!(
+            matches!(&jq, Expr::Alternative(left, _) if matches!(left.as_ref(), Expr::Alternative(..))),
+            "{jq:?}"
+        );
+        // `//=` is an assignment operator, not a `//`.
+        let jq = parse_with_mode(".a //= 1 // 2", ParserMode::Jq).unwrap();
+        assert!(
+            matches!(&jq, Expr::Alternative(left, _) if matches!(left.as_ref(), Expr::AlternativeAssign { .. })),
+            "{jq:?}"
+        );
     }
 
     #[test]
