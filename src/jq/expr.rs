@@ -1955,6 +1955,11 @@ pub struct Program {
     pub includes: Vec<Include>,
     /// The main expression (function definitions followed by the filter)
     pub expr: Expr,
+    /// Whether the text held an expression of its own after its definitions. A library
+    /// (a module, or `~/.jq`) may not: jq refuses one that does with `library should only
+    /// have function definitions, not a main expression` (#5351). A text of definitions
+    /// alone has `expr` set to the identity too, so `expr` cannot tell the two apart.
+    pub has_main_expr: bool,
 }
 
 impl Default for Program {
@@ -1964,6 +1969,7 @@ impl Default for Program {
             imports: Vec::new(),
             includes: Vec::new(),
             expr: Expr::Identity,
+            has_main_expr: false,
         }
     }
 }
@@ -1976,6 +1982,7 @@ impl Program {
             imports: Vec::new(),
             includes: Vec::new(),
             expr,
+            has_main_expr: true,
         }
     }
 }

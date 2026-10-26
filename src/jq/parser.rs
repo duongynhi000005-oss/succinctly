@@ -9425,15 +9425,18 @@ impl<'a> Parser<'a> {
         // Parse the main expression (which may include function definitions at module level)
         self.skip_ws();
         if !self.is_eof() {
-            program.expr = self.parse_module_body()?;
+            let (expr, has_main_expr) = self.parse_module_body()?;
+            program.expr = expr;
+            program.has_main_expr = has_main_expr;
         }
 
         Ok(program)
     }
 
     /// Parse module body - handles standalone function definitions
-    /// In module files, `def foo: ...; def bar: ...;` doesn't need a trailing expression
-    fn parse_module_body(&mut self) -> Result<Expr, ParseError> {
+    /// In module files, `def foo: ...; def bar: ...;` doesn't need a trailing expression.
+    /// The flag says whether there was one (#5351): the tree is the same either way.
+    fn parse_module_body(&mut self) -> Result<(Expr, bool), ParseError> {
         self.skip_ws();
 
         // Collect function definitions at module level
@@ -9454,10 +9457,11 @@ impl<'a> Parser<'a> {
         }
 
         // Parse the remaining expression (or use Identity if nothing left)
-        let tail_expr = if self.is_eof() {
-            Expr::Identity
-        } else {
+        let has_main_expr = !self.is_eof();
+        let tail_expr = if has_main_expr {
             self.parse_expr()?
+        } else {
+            Expr::Identity
         };
 
         // Wrap the tail expression with the function definitions in reverse order
@@ -9472,7 +9476,7 @@ impl<'a> Parser<'a> {
             };
         }
 
-        Ok(result)
+        Ok((result, has_main_expr))
     }
 
     /// Parse just the function definition parts (name, params, body) without the "then" clause
@@ -10027,6 +10031,29 @@ mod tests {
         }
     }
     use super::*;
+
+    /// #5351: a text of definitions alone and one with a main expression after them build the
+    /// same tree, so `has_main_expr` is what tells a library that may be loaded from one that
+    /// jq refuses.
+    #[test]
+    fn program_records_whether_a_main_expression_follows_the_definitions_5351() {
+        for (text, has_main) in [
+            ("", false),
+            ("   # a comment\n", false),
+            ("def f: 1;", false),
+            ("def f: 1; def g: f;", false),
+            ("module {a:1}; import \"m\" as m; def f: 1;", false),
+            (".", true),
+            ("def f: 1; .", true),
+            ("def f: 1; f", true),
+            ("import \"m\" as m; 1", true),
+        ] {
+            let program = parse_program(text).unwrap();
+            assert_eq!(program.has_main_expr, has_main, "{text:?}");
+        }
+        assert!(Program::from_expr(Expr::Identity).has_main_expr);
+        assert!(!Program::default().has_main_expr);
+    }
 
     /// #2648: `filename` is real yq's builtin and not jq's, so only yq mode
     /// parses it as one; jq mode leaves it an ordinary (undefined) call.

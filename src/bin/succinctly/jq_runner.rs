@@ -216,10 +216,14 @@ pub struct ModuleLoader {
     /// [`Self::bind_dot_jq`] to resolve those directives (#5339). `None` for a `~/.jq`
     /// without any, whose defs are already in [`Self::auto_loaded_defs`], and once bound.
     dot_jq: Option<DotJq>,
-    /// The path of a `~/.jq` that carries directives, bound or not, so
-    /// [`Self::failure_report`] can walk them last, where jq does (#5339). `None` for one
-    /// without any: there is nothing of it to walk.
+    /// The path of a `~/.jq` that carries directives, bound or not, or that cannot be used
+    /// at all, so [`Self::failure_report`] can walk it last, where jq does (#5339, #5351).
+    /// `None` for one with neither: there is nothing of it to walk.
     dot_jq_path: Option<PathBuf>,
+    /// Why a `~/.jq` that exists cannot be used (#5351): it does not read, does not parse, or
+    /// holds a main expression. jq refuses to compile anything while it is so, and
+    /// [`Self::bind_dot_jq`] raises this.
+    dot_jq_failure: Option<ReportEntry>,
     /// The modules whose own dependencies are currently being loaded, as
     /// `(resolved canonical file, module path as written)`, outermost first
     /// (#2865).
@@ -370,6 +374,13 @@ pub(crate) enum ReportEntry {
     /// byte-for-byte. `path` is the resolved file, matching
     /// [`Self::Syntax`]'s own by-path naming.
     Data(DataFileFailure),
+    /// A library -- a module, or `~/.jq` -- holds an expression of its own after its
+    /// definitions (#5351). jq checks this right after parsing the file, before it
+    /// looks at the file's own `import`/`include`, and counts it as one error:
+    /// `jq: error: jq: error: library should only have function definitions, not a main
+    /// expression`, then `<unknown location>` where the source echo would be. The doubled
+    /// `jq: error:` prefix is jq's own, captured live against 1.7.1.
+    MainExpression,
 }
 
 /// A data import's file that exists but could not be read or parsed
@@ -505,6 +516,12 @@ fn print_report_entry(entry: &ReportEntry) {
         ReportEntry::Data(DataFileFailure { path, detail }) => {
             eprintln!("jq: error loading data file {}: {detail}", path.display());
             eprintln!();
+        }
+        ReportEntry::MainExpression => {
+            eprintln!(
+                "jq: error: jq: error: library should only have function definitions, not a main expression"
+            );
+            eprintln!("<unknown location>");
         }
     }
 }
@@ -1423,6 +1440,12 @@ impl FailureWalk<'_> {
                 });
                 1
             }
+            // A main expression counts once and, as for a syntax error, its own directives
+            // are never reached (#5351).
+            Ok(program) if program.has_main_expr => {
+                self.entries.push(ReportEntry::MainExpression);
+                1
+            }
             Ok(program) => {
                 self.chain
                     .push((canonical.to_path_buf(), as_written.to_string()));
@@ -1446,6 +1469,7 @@ impl ModuleLoader {
         let mut auto_loaded_defs = Vec::new();
         let mut dot_jq = None;
         let mut dot_jq_path = None;
+        let mut dot_jq_failure = None;
 
         // Add command-line -L paths first
         for path in library_paths {
@@ -1470,32 +1494,56 @@ impl ModuleLoader {
             let jq_path = PathBuf::from(home).join(".jq");
             if jq_path.is_file() {
                 // Auto-load ~/.jq file - functions defined here are always available
-                if let Ok(contents) = std::fs::read_to_string(&jq_path) {
-                    if let Ok(program) = jq::parse_program(&contents) {
-                        // #2774: same stamping as an `include`d module's
-                        // defs, using `~/.jq`'s own canonical path.
-                        // Run id 0 is reserved for `~/.jq` (#2951): it is
-                        // wrapped as its own run like any module, so its
-                        // bodies cannot see an `include`d or `import`ed name
-                        // either -- real jq keeps both out.
-                        run_origins.insert(
-                            AUTO_LOAD_RUN_ID,
-                            canonical_or_self(&jq_path).to_string_lossy().into_owned(),
-                        );
-                        if program.includes.is_empty() && program.imports.is_empty() {
-                            auto_loaded_defs = extract_and_stamp_func_defs(&program.expr, jq_path);
-                        } else {
-                            // Its directives resolve against the search path, which is
-                            // not complete until the end of this function, and a failure
-                            // is a compile error this constructor cannot return (#5339).
+                //
+                // One that cannot be used is a compile error for every program (#5351), which
+                // this constructor cannot return: the failure waits for `bind_dot_jq`.
+                let canonical = canonical_or_self(&jq_path);
+                match std::fs::read_to_string(&jq_path) {
+                    Err(e) => {
+                        dot_jq_path = Some(jq_path.clone());
+                        dot_jq_failure = Some(ReportEntry::Data(DataFileFailure {
+                            path: canonical,
+                            detail: strerror_only(&e),
+                        }));
+                    }
+                    Ok(contents) => match jq::parse_program(&contents) {
+                        Err(error) => {
                             dot_jq_path = Some(jq_path.clone());
-                            dot_jq = Some(DotJq {
-                                program,
+                            dot_jq_failure = Some(ReportEntry::Syntax {
+                                path: canonical,
                                 contents,
-                                path: jq_path,
+                                error,
                             });
                         }
-                    }
+                        Ok(program) if program.has_main_expr => {
+                            dot_jq_path = Some(jq_path.clone());
+                            dot_jq_failure = Some(ReportEntry::MainExpression);
+                        }
+                        Ok(program) => {
+                            // #2774: same stamping as an `include`d module's
+                            // defs, using `~/.jq`'s own canonical path.
+                            // Run id 0 is reserved for `~/.jq` (#2951): it is
+                            // wrapped as its own run like any module, so its
+                            // bodies cannot see an `include`d or `import`ed name
+                            // either -- real jq keeps both out.
+                            run_origins
+                                .insert(AUTO_LOAD_RUN_ID, canonical.to_string_lossy().into_owned());
+                            if program.includes.is_empty() && program.imports.is_empty() {
+                                auto_loaded_defs =
+                                    extract_and_stamp_func_defs(&program.expr, jq_path);
+                            } else {
+                                // Its directives resolve against the search path, which is
+                                // not complete until the end of this function, and a failure
+                                // is a compile error this constructor cannot return (#5339).
+                                dot_jq_path = Some(jq_path.clone());
+                                dot_jq = Some(DotJq {
+                                    program,
+                                    contents,
+                                    path: jq_path,
+                                });
+                            }
+                        }
+                    },
                 }
             } else if jq_path.is_dir() {
                 // Add ~/.jq directory to search path
@@ -1524,6 +1572,7 @@ impl ModuleLoader {
             auto_loaded_defs,
             dot_jq,
             dot_jq_path,
+            dot_jq_failure,
             loading: Vec::new(),
             run_ids: BTreeMap::new(),
             run_origins,
@@ -1749,6 +1798,12 @@ impl ModuleLoader {
             })
         })?;
 
+        // jq checks this straight after parsing, before it reads the module's own
+        // directives (#5351).
+        if program.has_main_expr {
+            return Err(ModuleLoadError::single(ReportEntry::MainExpression));
+        }
+
         let own_id = self.run_id_for(target);
         self.bind_parsed_module(
             program,
@@ -1771,6 +1826,9 @@ impl ModuleLoader {
     /// Run id [`AUTO_LOAD_RUN_ID`] is its own run, which is where those dependencies are
     /// linked from (see [`Self::walk_modules`]).
     fn bind_dot_jq(&mut self) -> Result<(), ModuleLoadError> {
+        if let Some(failure) = self.dot_jq_failure.take() {
+            return Err(ModuleLoadError::single(failure));
+        }
         let Some(dot) = self.dot_jq.take() else {
             return Ok(());
         };
