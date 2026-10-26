@@ -21576,26 +21576,61 @@ mod meta_assign_798 {
     /// #2679: [`resolve_meta_assign_writes`] resolves each non-identity preceding stage in total
     /// isolation (`evaluate_input_quiet`, a fresh re-index-and-evaluate with no access to the
     /// surrounding pipe's scope), and `is_alias_sensitive_assign`'s `is_shape_preserving` admits
-    /// only a fixed operator list, not arbitrary navigation. A write behind a navigation stage,
-    /// or behind a stage that calls a user-defined function (`f` alone is unresolvable outside
-    /// the `def` that introduced it), used to exit 0 with the write silently dropped; both are
-    /// refused out loud now, the way #798's triage prefers. Real yq applies the first; it has no
-    /// `def` (its lexer rejects it), so the second has no oracle.
+    /// only a fixed operator list, not arbitrary navigation. A write behind a navigation stage
+    /// that is not a static path (`.[]`), or behind a stage that calls a user-defined function
+    /// (`f` alone is unresolvable outside the `def` that introduced it), used to exit 0 with the
+    /// write silently dropped; both are refused out loud now, the way #798's triage prefers. A
+    /// write behind a static path is applied on the navigated node, as real yq does. Real yq
+    /// has no `def` (its lexer rejects it), so the second has no oracle.
     #[test]
     fn metadata_write_behind_navigation_or_def_is_refused_not_dropped_2679() -> Result<()> {
-        // Real yq prints `b: 1 # hi` for the first; the write needs the navigated
-        // subtree's own presentation, so it is refused out loud.
-        for filter in [
-            ".a | .b line_comment = \"hi\"",
-            ".a | .b style = \"double\"",
-            ".a | .b anchor = \"x\"",
-            ".a | .b | .c line_comment = \"hi\"",
+        // Real yq's answers (captured live against v4.53.3): the write lands on the navigated
+        // node, which keeps its own presentation.
+        for (filter, input, expected) in [
+            (
+                ".a | .b line_comment = \"hi\"",
+                "a:\n  b: 1\n",
+                "b: 1 # hi\n",
+            ),
+            (".a | .b style = \"double\"", "a:\n  b: 1\n", "b: \"1\"\n"),
+            (".a | .b anchor = \"x\"", "a:\n  b: 1\n", "b: &x 1\n"),
+            (
+                ".a | .b as $v | .b line_comment = \"z\"",
+                "a:\n  b: 1\n",
+                "b: 1 # z\n",
+            ),
+            (
+                ".a | .b | .c line_comment = \"hi\"",
+                "a:\n  b:\n    c: 1\n",
+                "c: 1 # hi\n",
+            ),
+            (
+                ".a.b | .c line_comment = \"hi\"",
+                "a:\n  b:\n    c: 1\n",
+                "c: 1 # hi\n",
+            ),
+            (
+                ".[1] | .b line_comment = \"hi\"",
+                "- b: 0\n- b: 1 # old\n  c: [1, 2]\n",
+                "b: 1 # hi\nc: [1, 2]\n",
+            ),
+            (
+                ".a | .b line_comment = \"hi\" | .c line_comment = \"yo\"",
+                "a:\n  # above b\n  b: 1\n  c: {x: 1}\nz: 2\n",
+                "# above b\nb: 1 # hi\nc: {x: 1} # yo\n",
+            ),
         ] {
-            let (out, err, code) = run_yq_stdin_with_stderr(filter, "a:\n  b: 1\n", &[])?;
-            assert_eq!(code, 1, "{filter}: {err}");
-            assert_eq!(out, "", "{filter}");
-            assert!(err.contains("#2679"), "{filter}: {err}");
+            let (out, err, code) = run_yq_stdin_with_stderr(filter, input, &[])?;
+            assert_eq!((out.as_str(), code), (expected, 0), "{filter}: {err}");
         }
+
+        // A navigation that is not a static path stays refused rather than dropped: `.[]` answers
+        // several nodes, each its own document.
+        let (out, err, code) =
+            run_yq_stdin_with_stderr(".[] | .b line_comment = \"hi\"", "- b: 1\n- b: 2\n", &[])?;
+        assert_eq!(code, 1, "{err}");
+        assert_eq!(out, "");
+        assert!(err.contains("#2679"), "{err}");
 
         // A `def` that a stage ahead of the write reads through (succinctly's own surface;
         // real yq's lexer rejects `def`).
@@ -21605,16 +21640,12 @@ mod meta_assign_798 {
         assert_eq!(out, "");
         assert!(err.contains("#2679"), "{err}");
 
-        // The same refusals through an `as` binding, and through a `def` call that navigates.
-        for filter in [
-            ".a | .b as $v | .b line_comment = \"z\"",
-            "def f: .a; f | .b line_comment = \"z\"",
-        ] {
-            let (out, err, code) = run_yq_stdin_with_stderr(filter, "a:\n  b: 1\n", &[])?;
-            assert_eq!(code, 1, "{filter}: {err}");
-            assert_eq!(out, "", "{filter}");
-            assert!(err.contains("#2679"), "{filter}: {err}");
-        }
+        // The same refusal through a `def` call that navigates.
+        let filter = "def f: .a; f | .b line_comment = \"z\"";
+        let (out, err, code) = run_yq_stdin_with_stderr(filter, "a:\n  b: 1\n", &[])?;
+        assert_eq!(code, 1, "{filter}: {err}");
+        assert_eq!(out, "", "{filter}");
+        assert!(err.contains("#2679"), "{filter}: {err}");
 
         // Unchanged: the same write as the first stage, a `def` nothing calls, a
         // write a later stage replaces, and JSON output (no comments to lose).

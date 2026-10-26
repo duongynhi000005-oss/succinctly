@@ -6094,6 +6094,44 @@ fn split_trailing_static_nav(expr: &Expr) -> Option<(Expr, Expr, Vec<TreeStep<'_
     Some((prefix, pipe_of(tail), steps))
 }
 
+/// `expr` as a *static navigation* followed by a pipeline that holds a metadata write
+/// (`.a.b | .c line_comment = "x"`), split into the navigation and the rest (#2679); `None` for
+/// any other shape.
+///
+/// A static navigation (`.a`, `.a.b`, `.[0]`, see [`static_nav_steps`]) answers one node, so the
+/// rest of the pipe is the same query run on that node as its own document: it has the
+/// presentation tree of the navigated subtree, which is what the write pass needs and the whole
+/// document's route cannot give it (`is_alias_sensitive_assign` takes no navigation stage).
+/// The rest must itself be a presentation-preserving write.
+fn split_leading_static_nav(expr: &Expr) -> Option<(Expr, Expr)> {
+    fn flatten<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
+        match expr {
+            Expr::Pipe(stages) => stages.iter().for_each(|s| flatten(s, out)),
+            Expr::Paren(inner) if matches!(**inner, Expr::Pipe(_)) => flatten(inner, out),
+            other => out.push(other),
+        }
+    }
+    let mut stages = Vec::new();
+    flatten(expr, &mut stages);
+    let lead = stages
+        .iter()
+        .take_while(|stage| static_nav_steps(stage).is_some_and(|steps| !steps.is_empty()))
+        .count();
+    if lead == 0 || lead == stages.len() {
+        return None;
+    }
+    let (nav, rest) = stages.split_at(lead);
+    if reachable_meta_assigns(rest) == 0 {
+        return None;
+    }
+    let pipe_of = |parts: &[&Expr]| match parts {
+        [one] => (*one).clone(),
+        many => Expr::Pipe(many.iter().map(|e| (*e).clone()).collect()),
+    };
+    let rest = pipe_of(rest);
+    is_alias_sensitive_assign(&rest).then(|| (pipe_of(nav), rest))
+}
+
 /// `steps` as the owned [`MetaPathStep`] path [`owned_value_at`] walks.
 fn meta_path_of(steps: &[TreeStep<'_>]) -> Vec<MetaPathStep> {
     steps
@@ -6123,6 +6161,24 @@ fn evaluate_yaml_cursor<W: AsRef<[u64]> + Clone>(
     strip_style: bool,
     sort_keys: bool,
 ) -> Result<Vec<ResultWithComments>> {
+    // A metadata write behind a static navigation (#2679) is the write on the navigated node,
+    // run as the document it is: only when the node is there to be navigated to.
+    if need_comments {
+        if let Some((nav, rest)) = split_leading_static_nav(expr) {
+            if let GenericResult::OneCursor(navigated) =
+                eval_with_cursor_using::<YqSemantics, _>(&nav, cursor)
+            {
+                return evaluate_yaml_cursor(
+                    navigated,
+                    &rest,
+                    sink,
+                    need_comments,
+                    strip_style,
+                    sort_keys,
+                );
+            }
+        }
+    }
     let split = if need_comments {
         split_trailing_static_nav(expr)
     } else {
