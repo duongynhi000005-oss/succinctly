@@ -676,12 +676,28 @@ fn directive_search(
 
 /// One `search` entry as a directory; see [`directive_search`].
 fn expand_search_entry(entry: &str, origin: &Path, jq_origin: &Path) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME");
+    expand_search_entry_with(
+        entry,
+        home.as_ref().map(|home| home.to_string_lossy()).as_deref(),
+        origin,
+        jq_origin,
+    )
+}
+
+/// [`expand_search_entry`] with `$HOME` given, so it can be tested without touching the
+/// environment.
+fn expand_search_entry_with(
+    entry: &str,
+    home: Option<&str>,
+    origin: &Path,
+    jq_origin: &Path,
+) -> Option<PathBuf> {
     let home_relative;
     let entry = match entry.strip_prefix("~/") {
         Some(rest) => {
             // jq refuses a `~/` it cannot expand; here the entry finds nothing.
-            let home = std::env::var_os("HOME")?;
-            home_relative = format!("{}/{rest}", home.to_string_lossy());
+            home_relative = format!("{}/{rest}", home?);
             home_relative.as_str()
         }
         None => entry,
@@ -11664,6 +11680,66 @@ mod tests {
         ] {
             assert!(!has(filter), "{filter}");
         }
+    }
+
+    /// #5338: how a directive's `search` metadata becomes a list of directories. The rows were
+    /// captured from jq 1.7.1; `~/` and `$ORIGIN/` cannot be pinned through the CLI, since the
+    /// first needs a `HOME` and the second jq's own directory.
+    #[test]
+    fn directive_search_expands_each_entry_like_jq_5338() {
+        let meta = |value: MetaValue| vec![("search".to_string(), value)];
+        let string = |text: &str| MetaValue::String(text.to_string());
+        let search = |value: MetaValue| {
+            directive_search(
+                Some(&meta(value)),
+                Path::new("mod/dir"),
+                Path::new("/opt/jq"),
+            )
+        };
+        let paths = |dirs: &[&str]| Some(dirs.iter().map(PathBuf::from).collect::<Vec<_>>());
+
+        // A string is a list of one; an array keeps its string entries.
+        assert_eq!(search(string("L1")), paths(&["mod/dir/L1"]));
+        assert_eq!(
+            search(MetaValue::Array(vec![
+                string("a"),
+                MetaValue::Number(1.0),
+                string("/abs"),
+                string("."),
+                string(""),
+                string("$ORIGIN/lib"),
+            ])),
+            paths(&["mod/dir/a", "/abs", ".", "mod/dir/", "/opt/jq/lib"])
+        );
+        // Anything else is an empty list, which finds nothing.
+        for value in [
+            MetaValue::Null,
+            MetaValue::Number(1.0),
+            MetaValue::Bool(true),
+            MetaValue::Object(Vec::new()),
+        ] {
+            assert_eq!(search(value), Some(Vec::new()));
+        }
+        // No `search` key, or no metadata at all, leaves the default list.
+        let other = vec![("other".to_string(), MetaValue::Null)];
+        assert_eq!(
+            directive_search(Some(&other), Path::new("."), Path::new(".")),
+            None
+        );
+        assert_eq!(directive_search(None, Path::new("."), Path::new(".")), None);
+    }
+
+    /// #5338: `~/` is `$HOME`, and finds nothing where there is none.
+    #[test]
+    fn home_relative_search_entry_needs_home_5338() {
+        let expand = |home| expand_search_entry_with("~/lib", home, Path::new("."), Path::new("."));
+        assert_eq!(expand(Some("/h")), Some(PathBuf::from("/h/lib")));
+        assert_eq!(expand(None), None);
+        // Only a leading `~/` is special.
+        assert_eq!(
+            expand_search_entry_with("~lib", None, Path::new("o"), Path::new(".")),
+            Some(PathBuf::from("o/~lib"))
+        );
     }
 
     /// #5154: the named-variable flags apply in argv order and a name keeps its first value.
