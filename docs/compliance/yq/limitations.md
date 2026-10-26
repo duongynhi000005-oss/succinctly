@@ -5763,13 +5763,9 @@ Four known gaps this write shares with every other write form, none specific to 
   A leading user-defined `def` that a stage ahead of the write reads through (`def f: .; f | .a line_comment = "hi"`) is refused the same way, since each stage is re-evaluated alone with no `def` in scope; real yq has no `def`, so there is no oracle.
   A document that holds an alias anywhere is refused too (`.y | .m line_comment = "kk"` on `x: &k\n  m: 1\ny: *k\n`): the navigated node can be an alias, or hold one whose anchor lies outside it, and yq prints those as `*k`, which is unreadable on its own and which a root `*name` never is here.
   Pinned by `metadata_write_behind_navigation_or_def_is_refused_not_dropped_2679` and `tests/yq_cli/i2679.rs`.
-  Presentation a *non-metadata* write loses behind a navigation (`.a | .b = 5` drops the subtree's comments and flow style, where yq keeps them) is the same gap, still open.
-  [#2855](https://github.com/rust-works/succinctly/issues/2855)'s `sort_keys(f)` hits this
-  same gap through a value, not just a comment: `.a | sort_keys(.)` correctly reorders
-  `.a`'s own keys and returns just `.a` (matching real yq), but loses `.a.y`'s flow style —
-  the identical loss `.a | (.z = 3)` already had on `main`, confirmed unrelated to
-  `sort_keys` itself. Pinned by `test_yq_sort_keys_composes_with_pipe_2855`
-  (`tests/yq_cli_tests.rs`).
+  An ordinary write behind a static navigation (`.a | .b = 5`, `.a | del(.b)`, `.a | sort_keys(.)`) takes the same route, so the subtree keeps its comments, flow style and quoting as in yq (#5286).
+  [#2855](https://github.com/rust-works/succinctly/issues/2855)'s `sort_keys(f)` was the first case of the loss to be noticed; it is pinned by `test_yq_sort_keys_composes_with_pipe_2855` (`tests/yq_cli_tests.rs`) and `tests/yq_cli/i5286.rs`.
+  What remains is the loss that already exists without a navigation: a write that replaces a block or flow container with another shape drops the comment on the container it replaced (a trailing `# c` on `d: [1]`, a standalone `# note` above `d:`), where yq keeps it ([#5258](https://github.com/rust-works/succinctly/issues/5258)).
 
 Finally, one rule real yq decides by the target's value, reproduced rather than "fixed":
 a `line_comment` written onto a **block-rendered container** is dropped (`.a line_comment

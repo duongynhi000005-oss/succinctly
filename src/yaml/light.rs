@@ -528,7 +528,7 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
     /// `- # own` / `  c: 2`. It lives on the item's wrapper node, which a navigation such as
     /// `.a[1]` steps past, so it is read from the parent: the parent is that wrapper exactly when
     /// resolving it lands on this cursor. `None` for every other node.
-    fn dash_wrapper_comment(&self) -> Option<String> {
+    pub fn dash_wrapper_comment(&self) -> Option<String> {
         let wrapper = self.parent()?;
         let comment = wrapper.line_comment_raw()?;
         (wrapper.resolve_bare_seq_item().bp_pos == self.bp_pos).then(|| comment.to_string())
