@@ -1938,7 +1938,9 @@ impl ModuleLoader {
         // still beats a name that was never `include`d at all).
         expr = wrap_run(expr, self.auto_loaded_defs.clone(), AUTO_LOAD_RUN_ID, None);
 
-        for &(id, namespace) in &import_runs {
+        // Reversed, like the includes above (#5296): a later `import ... as f` shadows an
+        // earlier one for the names it defines, so it must be wrapped nearest the body.
+        for &(id, namespace) in import_runs.iter().rev() {
             // Each function under a namespaced name (namespace::funcname).
             // The alias rides the begin marker (#2989): only the defs of
             // *this* run were namespaced, so a bare sibling call inside one
