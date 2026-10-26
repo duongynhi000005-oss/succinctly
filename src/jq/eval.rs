@@ -91026,10 +91026,14 @@ fn builtin_load<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                     Err(e) => suppress_or_raise(e, optional),
                 }
             } else {
-                // Parse as YAML (default)
-                match crate::yaml::YamlIndex::build(&file_bytes) {
+                // Parse as YAML (default). #5356: past a UTF-8 byte-order mark at the front, as
+                // yq reads a YAML file; a JSON file with one is refused above, as in yq.
+                let file_bytes: &[u8] = file_bytes
+                    .strip_prefix(b"\xEF\xBB\xBF")
+                    .unwrap_or(&file_bytes);
+                match crate::yaml::YamlIndex::build(file_bytes) {
                     Ok(index) => {
-                        let root = index.root(&file_bytes);
+                        let root = index.root(file_bytes);
                         // YAML documents are wrapped in a sequence at the root
                         match root.value() {
                             crate::yaml::YamlValue::Sequence(mut docs) => {

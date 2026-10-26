@@ -7147,9 +7147,8 @@ fn read_file_bytes(path: &Path) -> std::result::Result<Vec<u8>, InputFileOpenErr
 /// the malformed forms.
 fn strip_leading_json_bom<'a>(raws: impl Iterator<Item = &'a mut Vec<u8>>) {
     if let Some(first) = raws.into_iter().find(|raw| !raw.is_empty()) {
-        if first.starts_with(crate::front_matter::UTF8_BOM) {
-            first.drain(..crate::front_matter::UTF8_BOM.len());
-        }
+        let bom_len = crate::front_matter::leading_bom_len(first);
+        first.drain(..bom_len);
     }
 }
 

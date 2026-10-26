@@ -773,6 +773,8 @@ succinctly yq-locate <FILE> [OPTIONS]
 - `--column <COLUMN>`: Column number (1-indexed, byte offset within line)
 - `--format <FORMAT>`: Output format: `expression` (default) or `json`
 
+A leading UTF-8 byte-order mark is not part of the document, as for `jq-locate`: offsets, columns and the `json` output's `byte_range` count from the first byte after it, and the `json` output carries `bom_length` (3) for such a file (#5356).
+
 ### Examples
 
 ```bash

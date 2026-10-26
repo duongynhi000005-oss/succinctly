@@ -934,23 +934,46 @@ fn yaml_to_owned_value<W: AsRef<[u64]> + Clone>(cursor: YamlCursor<'_, W>) -> Re
 /// be known to be empty before it is read, so a run mixing it with empty files reads nothing from
 /// those.
 fn empty_input_reads_as(
-    bytes: Vec<u8>,
+    mut bytes: Vec<u8>,
     format: InputFormat,
     input_files: &[String],
     at: usize,
     front_matter: bool,
 ) -> Option<Vec<u8>> {
+    // #5356: yq reads past a UTF-8 byte-order mark at the front of a YAML stream, each file
+    // being a stream of its own; it was becoming part of the first key. A JSON document with
+    // one is `invalid character 'ï'` in yq, so JSON keeps its mark and is refused as before.
+    // Done here, where every route's bytes pass before anything is indexed, and ahead of the
+    // emptiness test: a file that is only the mark reads as an empty one.
+    if format != InputFormat::Json {
+        bytes.drain(..crate::front_matter::leading_bom_len(&bytes));
+    }
     if !bytes.is_empty() || front_matter {
         return Some(bytes);
     }
     let every_input_is_empty = input_files.len() <= 1
         || input_files
             .iter()
-            .all(|file| std::fs::metadata(file).is_ok_and(|m| m.is_file() && m.len() == 0));
+            .all(|file| input_file_holds_no_document_bytes(file));
     (every_input_is_empty && at == 0).then(|| match format {
         InputFormat::Json => b"null\n".to_vec(),
         _ => b"\n".to_vec(),
     })
+}
+
+/// Whether `file` is a regular file with nothing in it but, at most, a byte-order mark (#5356):
+/// the mark is not data, so a file of only that is as empty as a zero-byte one.
+fn input_file_holds_no_document_bytes(file: &str) -> bool {
+    let Ok(metadata) = std::fs::metadata(file) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    metadata.len() == 0
+        || (metadata.len() == crate::front_matter::UTF8_BOM.len() as u64
+            && std::fs::read(file)
+                .is_ok_and(|bytes| crate::front_matter::leading_bom_len(&bytes) == bytes.len()))
 }
 
 /// Read input from stdin as bytes.
@@ -1008,7 +1031,7 @@ fn gathered_file_indices(input_files: &[String]) -> Vec<usize> {
         }
         // An empty file among others reads no document, so it has no source (#4099).
         if empty_input_reads_as(Vec::new(), InputFormat::Yaml, input_files, index, false).is_none()
-            && std::fs::metadata(file).is_ok_and(|m| m.is_file() && m.len() == 0)
+            && input_file_holds_no_document_bytes(file)
         {
             continue;
         }
