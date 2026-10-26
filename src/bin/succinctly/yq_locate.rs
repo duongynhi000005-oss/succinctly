@@ -84,7 +84,10 @@ pub fn run_yq_locate(args: YqLocateArgs) -> Result<i32> {
     // Validate offset
     if offset >= text.len() {
         let after_bom = if bom_len > 0 {
-            format!(", {} after the {bom_len}-byte byte-order mark", text.len())
+            format!(
+                "; offsets count from after the {bom_len}-byte byte-order mark, so the document is {} bytes",
+                text.len()
+            )
         } else {
             String::new()
         };

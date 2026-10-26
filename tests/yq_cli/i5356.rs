@@ -99,3 +99,37 @@ fn test_json_input_keeps_refusing_a_bom_5356() -> Result<()> {
     assert_ne!(code, 0);
     Ok(())
 }
+
+#[test]
+fn test_a_file_of_only_the_bom_is_an_empty_file_5356() -> Result<()> {
+    let mut plain = NamedTempFile::new()?;
+    writeln!(plain, "a: 1")?;
+    let mut only_bom = NamedTempFile::new()?;
+    write!(only_bom, "\u{feff}")?;
+    let mut other_bom = NamedTempFile::new()?;
+    write!(other_bom, "\u{feff}")?;
+    let mut last = NamedTempFile::new()?;
+    writeln!(last, "z: 9")?;
+
+    // Among others it contributes no document, and the files after it keep their position.
+    let (stdout, stderr, code) = run_yq_files(
+        "file_index",
+        &[plain.path(), only_bom.path(), last.path()],
+        JSON,
+    )?;
+    assert_eq!((stdout.as_str(), code), ("0\n2\n", 0), "{stderr}");
+    // Every input empty: the run reads one empty document, as for zero-byte files.
+    let (stdout, stderr, code) = run_yq_files(".", &[only_bom.path(), other_bom.path()], JSON)?;
+    assert_eq!((stdout.as_str(), code), ("null\n", 0), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn test_load_skips_the_bom_of_a_yaml_file_5356() -> Result<()> {
+    let mut loaded = NamedTempFile::new()?;
+    writeln!(loaded, "\u{feff}a: 1")?;
+    let filter = format!("load(\"{}\") | keys", loaded.path().display());
+    let (stdout, code) = run_yq_stdin(&filter, "k: 1\n", JSON)?;
+    assert_eq!((stdout.as_str(), code), ("[\"a\"]\n", 0));
+    Ok(())
+}

@@ -954,11 +954,26 @@ fn empty_input_reads_as(
     let every_input_is_empty = input_files.len() <= 1
         || input_files
             .iter()
-            .all(|file| std::fs::metadata(file).is_ok_and(|m| m.is_file() && m.len() == 0));
+            .all(|file| input_file_holds_no_document_bytes(file));
     (every_input_is_empty && at == 0).then(|| match format {
         InputFormat::Json => b"null\n".to_vec(),
         _ => b"\n".to_vec(),
     })
+}
+
+/// Whether `file` is a regular file with nothing in it but, at most, a byte-order mark (#5356):
+/// the mark is not data, so a file of only that is as empty as a zero-byte one.
+fn input_file_holds_no_document_bytes(file: &str) -> bool {
+    let Ok(metadata) = std::fs::metadata(file) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    metadata.len() == 0
+        || (metadata.len() == crate::front_matter::UTF8_BOM.len() as u64
+            && std::fs::read(file)
+                .is_ok_and(|bytes| crate::front_matter::leading_bom_len(&bytes) == bytes.len()))
 }
 
 /// Read input from stdin as bytes.
@@ -1016,7 +1031,7 @@ fn gathered_file_indices(input_files: &[String]) -> Vec<usize> {
         }
         // An empty file among others reads no document, so it has no source (#4099).
         if empty_input_reads_as(Vec::new(), InputFormat::Yaml, input_files, index, false).is_none()
-            && std::fs::metadata(file).is_ok_and(|m| m.is_file() && m.len() == 0)
+            && input_file_holds_no_document_bytes(file)
         {
             continue;
         }

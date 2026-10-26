@@ -284,7 +284,7 @@ fn jq_locate_and_at_offset_agree_on_a_bom_prefixed_file() -> Result<()> {
     let (_, stderr, code) = run(&["jq-locate", only_bom, "--offset", "0"])?;
     assert_ne!(code, 0);
     assert!(
-        stderr.contains("file size: 3 bytes, 0 after the 3-byte byte-order mark"),
+        stderr.contains("file size: 3 bytes; offsets count from after the 3-byte byte-order mark, so the document is 0 bytes"),
         "{stderr}"
     );
 
@@ -292,7 +292,7 @@ fn jq_locate_and_at_offset_agree_on_a_bom_prefixed_file() -> Result<()> {
     let (_, stderr, code) = run(&["jq-locate", bom, "--offset", "28"])?;
     assert_ne!(code, 0);
     assert!(
-        stderr.contains("file size: 31 bytes, 28 after the 3-byte byte-order mark"),
+        stderr.contains("file size: 31 bytes; offsets count from after the 3-byte byte-order mark, so the document is 28 bytes"),
         "{stderr}"
     );
     Ok(())
@@ -348,7 +348,7 @@ fn yq_locate_and_at_offset_agree_on_a_bom_prefixed_file() -> Result<()> {
     let (_, stderr, code) = run(&["yq-locate", bom, "--offset", "15"])?;
     assert_ne!(code, 0);
     assert!(
-        stderr.contains("file size: 18 bytes, 15 after the 3-byte byte-order mark"),
+        stderr.contains("file size: 18 bytes; offsets count from after the 3-byte byte-order mark, so the document is 15 bytes"),
         "{stderr}"
     );
     Ok(())
