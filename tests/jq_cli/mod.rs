@@ -140,3 +140,4 @@ mod i5273;
 mod i5274;
 mod i5279;
 mod i5285;
+mod i5288;

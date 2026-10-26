@@ -13367,10 +13367,120 @@ fn owned_assign_operand<S: EvalSemantics>(expr: &Expr, state: &OwnedValue) -> Op
     {
         return None;
     }
+    if let Some(value) = owned_state_operand_direct::<S>(expr, state) {
+        return Some(value);
+    }
+    #[cfg(test)]
+    OPERAND_REBUILT.with(|n| n.set(n.get() + 1));
     match eval_owned_multi_first::<S>(expr, state, Reentry::REBUILT) {
         Ok(Some(value)) => Some(value),
         _ => None,
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many operands [`owned_assign_operand`] settled through the rebuilt state (#5288): the
+    /// cost no copy-on-write count can see, so a test counts it.
+    static OPERAND_REBUILT: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+/// [`owned_assign_operand`]'s answer for an operand that reads `state` and builds only scalars
+/// from it -- `.i`, `.n > 3`, `.i + 1`, `[.i]`, `[.a, .b]` -- read straight off the tree (#5288).
+///
+/// The route below it hands the evaluator a rebuilt copy of the whole state: serialise it, index
+/// it again, evaluate on that. That is `O(state)` for every step of a fold, however little the
+/// operand reads (`.a += [.i]` over a state holding a 100k-element sibling cost 1.6 ms a step,
+/// against none for `.a += [$k]`), and a copy-on-write count cannot see it.
+/// [`eval_owned_pure`] is the in-tree evaluator for exactly these reads (#3697).
+///
+/// Narrower than that evaluator on purpose, to the answers the rebuilt route would spell the
+/// same: a scalar whose text is its own canonical one ([`owned_scalar_spelled_the_same`]), or a
+/// fresh array of them. A container read off the state is left to the route below, since handing
+/// it on would share its storage with the state the write goes into; a float is, since the
+/// rebuilt route re-spells it (#1008, #1054). Anything outside the grammar, or that raises,
+/// declines (`None`) to the evaluator's own route and text.
+fn owned_state_operand_direct<S: EvalSemantics>(
+    expr: &Expr,
+    state: &OwnedValue,
+) -> Option<OwnedValue> {
+    match unwrap_paren(expr) {
+        Expr::Array(inner) => match unwrap_paren(inner) {
+            Expr::Comma(items) if !items.is_empty() => {
+                let values = items
+                    .iter()
+                    .map(|item| owned_state_scalar_direct::<S>(item, state))
+                    .collect::<Option<Vec<_>>>()?;
+                Some(OwnedValue::array_from(values))
+            }
+            Expr::Comma(_) | Expr::Builtin(Builtin::Empty) => None,
+            single => Some(OwnedValue::array_from(vec![
+                owned_state_scalar_direct::<S>(single, state)?,
+            ])),
+        },
+        other => owned_state_scalar_direct::<S>(other, state),
+    }
+}
+
+/// One scalar of [`owned_state_operand_direct`]: a pure read ([`eval_owned_pure`]) with a
+/// canonical spelling, or `+`, `-` or `*` of two integers that are exact in a double.
+///
+/// Arithmetic is not part of [`eval_owned_pure`]'s grammar, because `arith_combine` hands an
+/// operand back unchanged for `. + null` and a navigated subvalue must not escape as an answer.
+/// Integers within ±2^53 cannot do that and are the range jq computes exactly, so the real
+/// `arith_combine` runs on them; the answer is taken only if it is again such an integer.
+fn owned_state_scalar_direct<S: EvalSemantics>(
+    expr: &Expr,
+    state: &OwnedValue,
+) -> Option<OwnedValue> {
+    if let Expr::Arithmetic {
+        op, left, right, ..
+    } = unwrap_paren(expr)
+    {
+        if !matches!(op, ArithOp::Add | ArithOp::Sub | ArithOp::Mul(_)) {
+            return None;
+        }
+        let left = owned_state_scalar_direct::<S>(left, state).filter(exact_integer)?;
+        let right = owned_state_scalar_direct::<S>(right, state).filter(exact_integer)?;
+        return arith_combine::<S>(*op, left, right)
+            .ok()
+            .filter(exact_integer);
+    }
+    let value = eval_owned_pure::<S>(expr, state, ResultPosition::Operand)?.ok()?;
+    owned_scalar_spelled_the_same(&value).then_some(value)
+}
+
+/// An integer (or an integer literal spelled as its own digits) no larger than 2^53: the range in
+/// which jq's double arithmetic is exact ([`jq_int_within_exact_f64_range`]).
+fn exact_integer(value: &OwnedValue) -> bool {
+    match value {
+        OwnedValue::Int(n) => jq_int_within_exact_f64_range(*n),
+        OwnedValue::NumberLiteral(NumberRepr::Int(n), _) => {
+            jq_int_within_exact_f64_range(*n) && owned_scalar_spelled_the_same(value)
+        }
+        _ => false,
+    }
+}
+
+/// Whether `value` is a scalar that prints the way the rebuilt route would print it: `null`, a
+/// boolean, a string, an integer, or an integer literal whose text is its own digits.
+fn owned_scalar_spelled_the_same(value: &OwnedValue) -> bool {
+    match value {
+        OwnedValue::Null | OwnedValue::Bool(_) | OwnedValue::Int(_) | OwnedValue::String(_) => true,
+        OwnedValue::NumberLiteral(NumberRepr::Int(n), text) => is_canonical_int_text(*n, text),
+        _ => false,
+    }
+}
+
+/// Whether `text` is exactly how `n` is written in decimal: no `+`, no leading zero, no `-0`.
+/// Allocation-free, since it runs for every integer literal a fold step reads.
+fn is_canonical_int_text(n: i64, text: &str) -> bool {
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && (digits == "0" || !digits.starts_with('0'))
+        && (n != 0 || text == "0")
+        && text.parse::<i64>() == Ok(n)
 }
 
 /// The step a `.[K]` key names: the string or integer-spelled number `K` is
@@ -151943,6 +152053,135 @@ mod share_audit_2999 {
             "reduce .[] as $r ({n: 0, l: []}; .l += [$r.score] | .n += 1)",
             &[(Kind::ArrayMakeMut, 1)],
         );
+    }
+
+    /// #5288: an operand that reads the state into scalars (`[.i]`, `[.a, .b]`, `.n > 3`) is read
+    /// off the tree. The route it replaced serialised and re-indexed the whole state for every
+    /// step of a fold (`.a += [.i]` was quadratic, and 1.6 ms a step beside an untouched 100k-element
+    /// field), which no copy count shows -- so this counts the operands that still go through it.
+    /// Where it answers, it answers what the rebuilt route does, spelling included; where it
+    /// cannot promise that (a float, a container read off the state, arithmetic) it declines.
+    #[test]
+    fn state_reading_operand_is_read_off_the_tree_5288() {
+        let state = |json: &str| {
+            let index = JsonIndex::build(json.as_bytes());
+            crate::jq::eval_generic::to_owned_cursor::<JqSemantics, _>(&index.root(json.as_bytes()))
+                .expect("decodes")
+        };
+        let operand = |filter: &str| parse(filter).expect("parses");
+        let rebuilt = |expr: &Expr, state: &OwnedValue| {
+            eval_owned_multi_first::<JqSemantics>(expr, state, Reentry::REBUILT)
+                .expect("evaluates")
+                .expect("one output")
+        };
+        let doc = r#"{"i":3,"j":"x","n":10,"b":true,"z":null,"s":"hello","o":{"x":7},"a":[1,2],"f":1.5,"e":1e3,"big":100000000000000000000,"lit":1.0,"neg":-4,"m":9007199254740992}"#;
+        // (operand, whether it is answered from the tree).
+        let rows: &[(&str, bool)] = &[
+            (".i", true),
+            (".j", true),
+            (".zz", true),
+            (".z", true),
+            ("[.i]", true),
+            ("[.i, .j]", true),
+            ("[.zz]", true),
+            ("[.b, .z, .s]", true),
+            ("[.o.x]", true),
+            ("[.neg]", true),
+            ("[.n > 3]", true),
+            ("[(.n > 3) and .b]", true),
+            ("[.i | not]", true),
+            ("[.o | .x]", true),
+            ("[.i | type]", true),
+            // Not promised to spell the same: a float, a literal with a float spelling.
+            (".f", false),
+            ("[.f]", false),
+            ("[.i, .f]", false),
+            ("[.e]", false),
+            ("[.big]", false),
+            ("[.lit]", false),
+            // A container read off the state would share its storage with the state it is written to.
+            (".a", false),
+            ("[.a]", false),
+            (".o", false),
+            ("[.i, .o]", false),
+            // Arithmetic of integers that a double holds exactly is computed here.
+            ("[.i + 1]", true),
+            ("[.i * .n - 2]", true),
+            ("[(.i + .n) * 2]", true),
+            (".neg - 1", true),
+            // ...and nothing else: a float, a string, a division, a null operand, a result past 2^53.
+            ("[.f + 1]", false),
+            ("[.s + \"x\"]", false),
+            ("[.i / 2]", false),
+            ("[.i % 2]", false),
+            ("[.z + 1]", false),
+            ("[.zz + 1]", false),
+            ("[.m + 1]", false),
+            ("[.m * 2]", false),
+            ("[.big + 1]", false),
+            // Outside the pure grammar: `length`, a call.
+            ("length", false),
+            ("[length]", false),
+        ];
+        let state = state(doc);
+        for (filter, direct) in rows {
+            let expr = operand(filter);
+            let answered = owned_state_operand_direct::<JqSemantics>(&expr, &state);
+            assert_eq!(answered.is_some(), *direct, "{filter}");
+            if let Some(value) = answered {
+                let expected = rebuilt(&expr, &state);
+                assert_eq!(value.to_json(), expected.to_json(), "{filter}");
+                assert_eq!(value, expected, "{filter}");
+            }
+        }
+        // The counter: a closed-for-width operand never touches the rebuilt route, however wide
+        // the state is, and an operand that does needs it exactly once.
+        let wide = state_with_width(100_000);
+        let before = OPERAND_REBUILT.with(core::cell::Cell::get);
+        for filter in ["[.i]", ".i", "[.i, .j]", "[.n > 3]"] {
+            assert!(owned_assign_operand::<JqSemantics>(&operand(filter), &wide).is_some());
+        }
+        assert_eq!(OPERAND_REBUILT.with(core::cell::Cell::get), before);
+        for filter in ["[.i + 1]", ".n * 2 - .i"] {
+            assert!(owned_assign_operand::<JqSemantics>(&operand(filter), &wide).is_some());
+        }
+        assert_eq!(OPERAND_REBUILT.with(core::cell::Cell::get), before);
+        assert!(owned_assign_operand::<JqSemantics>(&operand("[.i / 2]"), &wide).is_some());
+        assert_eq!(OPERAND_REBUILT.with(core::cell::Cell::get), before + 1);
+    }
+
+    /// #5288: an integer literal prints as it was written, so the direct route takes one only when
+    /// its text is the integer's own digits.
+    #[test]
+    fn canonical_integer_text_is_the_integers_own_digits_5288() {
+        for (n, text, canonical) in [
+            (5, "5", true),
+            (0, "0", true),
+            (-5, "-5", true),
+            (i64::MAX, "9223372036854775807", true),
+            (5, "+5", false),
+            (5, "05", false),
+            (0, "-0", false),
+            (0, "00", false),
+            (5, "5.0", false),
+            (5, "5e0", false),
+            (5, "", false),
+            (5, "-", false),
+            (6, "5", false),
+        ] {
+            assert_eq!(is_canonical_int_text(n, text), canonical, "{n} {text:?}");
+        }
+    }
+
+    /// The state `{i: 3, j: "x", n: 10, big: [0, 1, ..]}` with `width` elements in `big`.
+    fn state_with_width(width: usize) -> OwnedValue {
+        let big: Vec<OwnedValue> = (0..width as i64).map(OwnedValue::Int).collect();
+        let mut map = IndexMap::new();
+        map.insert("i".to_string(), OwnedValue::Int(3));
+        map.insert("j".to_string(), OwnedValue::String("x".into()));
+        map.insert("n".to_string(), OwnedValue::Int(10));
+        map.insert("big".to_string(), OwnedValue::array_from(big));
+        OwnedValue::Object(map.into())
     }
 
     /// #5273: one field that grows -- an array, an object or a string -- is extended where it
