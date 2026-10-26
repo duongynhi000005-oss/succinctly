@@ -21,7 +21,10 @@ tracking-allocator = "0.4"
 rand = "0.8"
 rand_chacha = "0.3"
 sucds = { version = "0.8", features = ["intrinsics"] }
-sux = "0.14"
+# default-features = false drops sux's `zstd`, `flate2` and `rayon` (serialisation and parallel
+# builders this bench never touches). `zstd` 0.13 carries RUSTSEC-2026-0391 and its `zstd-safe`
+# 7.x a family of advisories fixed only in zstd >= 0.14.3, which sux 0.14 cannot take (#5342).
+sux = { version = "0.14", default-features = false }
 vers-vecs = { version = "1.10", features = ["simd"] }
 
 [[bench]]
