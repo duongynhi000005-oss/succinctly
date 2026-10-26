@@ -89897,6 +89897,42 @@ fn parse_strptime(input: &str, fmt: &str) -> Result<(BrokenDownTime, String), St
                     minute =
                         check_clock_field(parse_digits(&mut input_iter, 2)?, 0..=59, "minute")?;
                 }
+                Some('s') => {
+                    // #5303: seconds since the epoch -- leading white space, an optional
+                    // sign, then digits (all three confirmed on the pinned jq: `"  12"`,
+                    // `"+5"` and `"-1"` read, `"- 5"`, `"+-5"` and a bare sign do not) --
+                    // expanded through the local zone, as `localtime_r` does, which is the
+                    // zone `localtime` uses. It replaces the date and time read so far
+                    // (`"2015 1425599621" | strptime("%Y %s")` is the instant's year);
+                    // weekday and yearday are recomputed below.
+                    while input_iter.peek().is_some_and(|c| c.is_whitespace()) {
+                        input_iter.next();
+                    }
+                    let negative = match input_iter.peek() {
+                        Some('-') => {
+                            input_iter.next();
+                            true
+                        }
+                        Some('+') => {
+                            input_iter.next();
+                            false
+                        }
+                        _ => false,
+                    };
+                    let magnitude = parse_digits(&mut input_iter, 19)?;
+                    let secs = if negative { -magnitude } else { magnitude };
+                    let zone = local_zone::at_instant(secs);
+                    let shifted = secs
+                        .checked_add(zone.offset_secs)
+                        .ok_or_else(|| EvalError::datetime_out_of_range().to_string())?;
+                    let t = broken_down_time_from_unix_secs(shifted).map_err(|e| e.to_string())?;
+                    year = t.year;
+                    month = t.month;
+                    day = t.day;
+                    hour = t.hour;
+                    minute = t.minute;
+                    second = t.second;
+                }
                 Some('S') => {
                     // Upper bound 60, not 59: a leap second is valid and
                     // real jq accepts it (confirmed live, #971).
