@@ -91334,228 +91334,16 @@ fn cannot_allocate_cartesian_product(lens: &[usize]) -> EvalError {
 }
 
 /// Builtin: builtins - list all builtin function names
+///
+/// jq 1.7.1's own roster (#5304), `name/arity`, in the order jq prints it:
+/// [`super::resolve::JQ_BUILTIN_ROSTER`], which `tests/data/jq-builtin-names.txt` pins against the
+/// oracle. `builtins` is introspection of jq's set, so a program that tests membership in it must
+/// see jq's answer; a name jq does not define (`trim/0`, `leaf_paths/0`, `reduce/3`, the yq
+/// metadata getters, ...) is callable where it is an extension but is not listed.
 fn builtin_builtins<'a, W: Clone + AsRef<[u64]>>() -> QueryResult<'a, W> {
-    // Return a sorted array of all builtin function names with their arity
-    let builtins = vec![
-        // Type functions (arity 0)
-        "type/0",
-        "isnull/0",
-        "isboolean/0",
-        "isnumber/0",
-        "isstring/0",
-        "isarray/0",
-        "isobject/0",
-        // Type filters (arity 0)
-        "values/0",
-        "nulls/0",
-        "booleans/0",
-        "numbers/0",
-        "strings/0",
-        "arrays/0",
-        "objects/0",
-        "iterables/0",
-        "scalars/0",
-        "normals/0",
-        "finites/0",
-        // Length & keys (arity 0)
-        "length/0",
-        "utf8bytelength/0",
-        "keys/0",
-        "keys_unsorted/0",
-        // has/in (arity 1)
-        "has/1",
-        "in/1",
-        "IN/1",
-        "IN/2",
-        // Selection (arity 0-1)
-        "select/1",
-        "empty/0",
-        // Map/Iteration (arity 1)
-        "map/1",
-        "map_values/1",
-        // Reduction (arity 0-1)
-        "add/0",
-        "any/0",
-        "any/1",
-        "any/2",
-        "all/0",
-        "all/1",
-        "all/2",
-        "min/0",
-        "max/0",
-        "min_by/1",
-        "max_by/1",
-        // String functions (arity 0-1)
-        "ascii_downcase/0",
-        "ascii_upcase/0",
-        "ltrimstr/1",
-        "rtrimstr/1",
-        "startswith/1",
-        "endswith/1",
-        "split/1",
-        "join/1",
-        "contains/1",
-        "inside/1",
-        "trim/0",
-        "ltrim/0",
-        "rtrim/0",
-        // Array functions (arity 0-1)
-        "first/0",
-        "last/0",
-        "nth/1",
-        "reverse/0",
-        "flatten/0",
-        "flatten/1",
-        "group_by/1",
-        "unique/0",
-        "unique_by/1",
-        "sort/0",
-        "sort_by/1",
-        "transpose/0",
-        "bsearch/1",
-        // Object functions (arity 0-1)
-        "to_entries/0",
-        "from_entries/0",
-        "with_entries/1",
-        "pick/1",
-        // Type conversions (arity 0)
-        "tostring/0",
-        "tonumber/0",
-        "tojson/0",
-        "fromjson/0",
-        // String functions (arity 0-1)
-        "explode/0",
-        "implode/0",
-        "test/1",
-        "indices/1",
-        "index/1",
-        "rindex/1",
-        "INDEX/1",
-        "INDEX/2",
-        "tojsonstream/0",
-        "fromjsonstream/0",
-        "tostream/0",
-        "fromstream/1",
-        "truncate_stream/1",
-        // Path operations (arity 0-2)
-        "path/1",
-        "paths/0",
-        "paths/1",
-        "leaf_paths/0",
-        "getpath/1",
-        "setpath/2",
-        "delpaths/1",
-        "del/1",
-        // Math functions (arity 0-2)
-        "floor/0",
-        "ceil/0",
-        "round/0",
-        "sqrt/0",
-        "fabs/0",
-        "abs/0",
-        "log/0",
-        "log10/0",
-        "log2/0",
-        "exp/0",
-        "exp10/0",
-        "exp2/0",
-        "pow/2",
-        "sin/0",
-        "cos/0",
-        "tan/0",
-        "asin/0",
-        "acos/0",
-        "atan/0",
-        "atan2/2",
-        "sinh/0",
-        "cosh/0",
-        "tanh/0",
-        "asinh/0",
-        "acosh/0",
-        "atanh/0",
-        // Number classification (arity 0)
-        "infinite/0",
-        "nan/0",
-        "isinfinite/0",
-        "isnan/0",
-        "isnormal/0",
-        "isfinite/0",
-        // Control flow (arity 1-2)
-        "recurse/0",
-        "recurse/1",
-        "recurse/2",
-        "walk/1",
-        "isvalid/1",
-        "limit/2",
-        "skip/2",
-        "first/1",
-        "last/1",
-        "nth/2",
-        "until/2",
-        "while/2",
-        "repeat/1",
-        "range/1",
-        "range/2",
-        "range/3",
-        "reduce/3",
-        "foreach/3",
-        "foreach/4",
-        // Debug (arity 0-1)
-        "debug/0",
-        "debug/1",
-        // Process control (#791)
-        "halt/0",
-        "halt_error/0",
-        "halt_error/1",
-        "stderr/0",
-        // Streaming input (#723)
-        "input/0",
-        "inputs/0",
-        "input_line_number/0",
-        // Environment (arity 0-1)
-        "env/0",
-        "env/1",
-        "strenv/1",
-        // Time (arity 0-1)
-        "now/0",
-        "gmtime/0",
-        "localtime/0",
-        "mktime/0",
-        "strftime/1",
-        "strptime/1",
-        "todate/0",
-        "fromdate/0",
-        "todateiso8601/0",
-        "fromdateiso8601/0",
-        // Combinations (arity 0-1)
-        "combinations/0",
-        "combinations/1",
-        // Additional math (arity 0)
-        "trunc/0",
-        // Type conversion (arity 0)
-        "toboolean/0",
-        // Meta (arity 0)
-        "builtins/0",
-        "modulemeta/0",
-        // Error handling (arity 0-1)
-        "error/0",
-        "error/1",
-        // YAML metadata (yq, arity 0)
-        "tag/0",
-        "anchor/0",
-        "style/0",
-        "kind/0",
-        "key/0",
-        "line/0",
-        "column/0",
-        "line_comment/0",
-        "parent/0",
-        "parent/1",
-    ];
-
-    let arr: Vec<OwnedValue> = builtins
+    let arr: Vec<OwnedValue> = super::resolve::JQ_BUILTIN_ROSTER
         .iter()
-        .map(|s| OwnedValue::String((*s).to_string().into()))
+        .map(|(name, arity)| OwnedValue::String(format!("{name}/{arity}").into()))
         .collect();
 
     QueryResult::Owned(OwnedValue::array_from(arr))
@@ -136320,8 +136108,8 @@ mod tests {
         // builtins returns an array of builtin function names
         query!(b"null", "builtins | length",
             QueryResult::Owned(OwnedValue::Int(n)) => {
-                // Should have many builtins (at least 100)
-                assert!(n > 100, "should have many builtins, got {n}");
+                // jq 1.7.1's roster, exactly (#5304).
+                assert_eq!(n, 218, "builtins is jq's roster");
             }
         );
         // Check some known builtins exist
@@ -136331,9 +136119,8 @@ mod tests {
             }
         );
         // #2035: modulemeta is arity 0 (matching real jq's modulemeta/0),
-        // not the arity-1 entry this list carried before the parser fix --
-        // pinned here since builtin_builtins's hand-maintained list has no
-        // other guard tying it to the parser's actual accepted grammar.
+        // not the arity-1 entry this list carried before the parser fix. The list is now the
+        // oracle's roster (#5304), so this is also a check that the roster says so.
         query!(b"null", r#"builtins | any(. == "modulemeta/0")"#,
             QueryResult::Owned(OwnedValue::Bool(b)) => {
                 assert!(b, "builtins should list modulemeta/0");
