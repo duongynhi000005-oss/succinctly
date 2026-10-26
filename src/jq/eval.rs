@@ -26974,12 +26974,11 @@ fn builtin_capture_with_flags<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 fn capture_object(re: &JqRegex, caps: &regex::Captures) -> OwnedValue {
     let mut entries = IndexMap::new();
     for name in re.capture_names().flatten() {
-        if let Some(m) = caps.name(name) {
-            entries.insert(
-                name.to_string(),
-                OwnedValue::String(m.as_str().to_string().into()),
-            );
-        }
+        let val = match caps.name(name) {
+            Some(m) => OwnedValue::String(m.as_str().to_string().into()),
+            None => OwnedValue::Null,
+        };
+        entries.insert(name.to_string(), val);
     }
     OwnedValue::Object(entries.into())
 }
@@ -27678,8 +27677,9 @@ fn scan_with_resolved_pattern<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
             // Has capture groups - return array of captured strings
             let mut captured = Vec::new();
             for i in 1..capture_count {
-                if let Some(m) = caps.get(i) {
-                    captured.push(OwnedValue::String(m.as_str().to_string().into()));
+                match caps.get(i) {
+                    Some(m) => captured.push(OwnedValue::String(m.as_str().to_string().into())),
+                    None => captured.push(OwnedValue::Null),
                 }
             }
             results.push(OwnedValue::array_from(captured));
