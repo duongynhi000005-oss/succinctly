@@ -112070,8 +112070,13 @@ fn test_tonumber_control_character_message_family_is_jq_mode_only_2878() -> Resu
     let prog = format!("\"[\\\"a{}b\\\"]\" | tonumber", '\u{9}');
     let (_stdout, stderr, code) = run_jq_full(&["-nc", &prog], None)?;
     assert_ne!(code, 0, "tonumber must still fail");
+    // jq's parser words it as the control character it is (#5309; was `Invalid numeric literal`
+    // while the diagnostic was approximated): still the parse-error family, not the string that
+    // "is valid JSON but not a number".
     assert!(
-        stderr.contains("Invalid numeric literal"),
+        stderr.contains(
+            "Invalid string: control characters from U+0000 through U+001F must be escaped"
+        ) && !stderr.contains("cannot be parsed as a number"),
         "jq mode should report the parse-error family, got: {stderr}"
     );
     Ok(())

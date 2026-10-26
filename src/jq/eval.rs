@@ -22936,10 +22936,18 @@ pub(super) fn tonumber_from_str(s: &str, yq_mode: bool) -> Result<OwnedValue, Ev
     // jq's parser also skips one UTF-8 BOM before the whitespace (#5312), so `"\u{feff}1"` is 1;
     // a doubled one, or one behind whitespace, is refused. The errors below still name `s`, BOM
     // and all, as jq does.
+    //
+    // `tonumber` passes jq's parser a C string, so a NUL ends the text it sees (`"1\u00002" |
+    // tonumber` is 1); `fromjson`, which passes a length, does not (#5309).
+    let c_text = if yq_mode {
+        s
+    } else {
+        s.split('\0').next().unwrap_or(s)
+    };
     let trimmed = if yq_mode {
         s
     } else {
-        s.strip_prefix('\u{feff}').unwrap_or(s).trim()
+        c_text.strip_prefix('\u{feff}').unwrap_or(c_text).trim()
     };
     // Materialize a JSON-shaped number as a `NumberLiteral` so it keeps its
     // *source spelling*, rather than collapsing it through a bare
@@ -23113,7 +23121,7 @@ pub(super) fn tonumber_from_str(s: &str, yq_mode: bool) -> Result<OwnedValue, Ev
             s.to_string().into(),
         )))
     } else {
-        Err(EvalError::invalid_numeric_literal_after_bom(s))
+        Err(EvalError::json_parse_failure(c_text))
     }
 }
 
@@ -23663,9 +23671,7 @@ fn builtin_fromjson<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                     Err(_) if S::TAG == EvalTag::Yq => {
                         QueryResult::Error(EvalError::invalid_numeric_literal(json_str))
                     }
-                    Err(_) => {
-                        QueryResult::Error(EvalError::invalid_numeric_literal_after_bom(json_str))
-                    }
+                    Err(_) => QueryResult::Error(EvalError::json_parse_failure(json_str)),
                 }
             }
             Err(e) => QueryResult::Error(EvalError::decode_failure(e.message())),
@@ -126317,7 +126323,7 @@ mod tests {
             (
                 br#""1 2""#,
                 "fromjson",
-                Err("Invalid numeric literal at EOF at line 1, column 3 (while parsing '1 2')"),
+                Err("Unexpected extra JSON values (while parsing '1 2')"),
             ),
             (br#"" 42 ""#, "fromjson", Ok("42")),
             (br#""[1,2]""#, "fromjson", Ok("[1,2]")),

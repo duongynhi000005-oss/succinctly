@@ -89,6 +89,7 @@ mod key_index;
 mod lazy;
 mod local_zone;
 mod math;
+mod parse_message;
 mod parser;
 // #5223: the register-carrying path-mode interpreter, reachable only from
 // `succinctly dev jq-path-mode` and its own tests.

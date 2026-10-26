@@ -1737,6 +1737,25 @@ impl EvalError {
         ))
     }
 
+    /// What jq says when `fromjson` or `tonumber` hands `text` to its JSON parser and the parser
+    /// refuses it: the parser's own diagnostic, with the line and column it had reached, and
+    /// `(while parsing '<text>')` after it (#5309). jq mode only.
+    ///
+    /// Falls back to [`Self::invalid_numeric_literal_after_bom`] for a text the port in
+    /// `src/jq/parse_message.rs` reads as valid but the validator refused: a refusal is still a
+    /// refusal, worded the way it was before.
+    pub fn json_parse_failure(text: &str) -> Self {
+        match super::parse_message::jq_parse_message(text.as_bytes()) {
+            // The parser reads the whole string, but the message quotes it as a C string, so a
+            // NUL ends the quotation.
+            Some(message) => {
+                let quoted = text.split('\0').next().unwrap_or(text);
+                Self::new(format!("{message} (while parsing '{quoted}')"))
+            }
+            None => Self::invalid_numeric_literal_after_bom(text),
+        }
+    }
+
     /// `Invalid JSON text: <cause>` — a document the semi-index accepted that
     /// is not, in fact, valid JSON (#1194).
     ///
