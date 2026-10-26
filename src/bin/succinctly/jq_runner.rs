@@ -23,8 +23,8 @@ use succinctly::jq::eval_generic::{
 use succinctly::jq::walk::{map_builtin_subexprs, map_pattern_subexprs, stamp_loc_file};
 use succinctly::jq::{
     self, format_number_jq_compat, jq_bare_float_display, nonfinite_display_string, Builtin,
-    ErrorKind, EvalError, EvalErrorPayload, Expr, FuncDefBound, JqSemantics, JqValue, OwnedValue,
-    Param, Pattern, Program, StreamStats, MAX_VALUE_TREE_DEPTH,
+    ErrorKind, EvalError, EvalErrorPayload, Expr, FuncDefBound, JqSemantics, JqValue, MetaObject,
+    MetaValue, OwnedValue, Param, Pattern, Program, StreamStats, MAX_VALUE_TREE_DEPTH,
 };
 use succinctly::json::light::{preceding_gap_ok, JsonCursor, JsonString, StandardJson};
 use succinctly::json::validate::{self, ValidationError};
@@ -187,6 +187,11 @@ pub struct ModuleLoader {
     search_path: Vec<PathBuf>,
     /// The library directories alone, which `modulemeta` searches (#5321)
     lib_dirs: Vec<PathBuf>,
+    /// The directory a relative `search` entry in the main program's own directives is
+    /// relative to: the working directory, or the `-f` file's directory (#5338)
+    prog_origin: PathBuf,
+    /// jq's own directory, which a `search` entry's `$ORIGIN/` stands for (#5338)
+    jq_origin: PathBuf,
     /// Loaded modules, keyed by [`Self::run_key`] -- the same canonical-file
     /// key [`Self::run_ids`]/[`Self::run_origins`] intern by, not the literal
     /// path a caller happened to write (function definitions: name, params,
@@ -613,6 +618,91 @@ fn invalid_module_path(module_path: &str) -> Option<String> {
         previous = Some(component);
     }
     None
+}
+
+/// What one directive asks the search to find: the path as written and, when the directive
+/// carries `search` metadata, the directories that replace the default list for it (#5338).
+struct Target<'a> {
+    path: &'a str,
+    search: Option<Vec<PathBuf>>,
+}
+
+#[cfg(test)]
+impl<'a> Target<'a> {
+    /// A directive without `search` metadata, resolved on the default list.
+    const fn plain(path: &'a str) -> Self {
+        Self { path, search: None }
+    }
+}
+
+/// The directories an `import`/`include`'s `search` metadata names, or `None` for a directive
+/// without it, which uses the default list (#5338).
+///
+/// A `search` **replaces** the default list for that one directive: the current directory and
+/// `-L` are not tried after it, so `{search:"./nonexist"}` finds nothing even where the current
+/// directory holds the module. A string is a list of one; an array contributes its string
+/// entries and skips the rest; any other value (a number, `null`, an object) is an empty list
+/// and finds nothing. Each entry is `~/...` under `$HOME`, `$ORIGIN/...` under jq's own
+/// directory (`jq_origin`), a path that starts with `/` as it stands, and anything else
+/// (including the empty string, but not exactly `.`, which is the working directory)
+/// relative to `origin`: the directory of the file that holds the directive, or for the main
+/// program the working directory (the `-f` file's directory under `-f`). Captured live
+/// against jq 1.7.1, including that a relative entry in a *module's* directive (or in
+/// `~/.jq`) resolves against that file's directory and not the working one. A
+/// `module {search: ...};` header is not read.
+fn directive_search(
+    metadata: Option<&MetaObject>,
+    origin: &Path,
+    jq_origin: &Path,
+) -> Option<Vec<PathBuf>> {
+    let (_, value) = metadata?.iter().find(|(key, _)| key == "search")?;
+    let entries: Vec<&str> = match value {
+        MetaValue::String(entry) => vec![entry.as_str()],
+        MetaValue::Array(items) => items
+            .iter()
+            .filter_map(|item| match item {
+                MetaValue::String(entry) => Some(entry.as_str()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    Some(
+        entries
+            .into_iter()
+            .filter_map(|entry| expand_search_entry(entry, origin, jq_origin))
+            .collect(),
+    )
+}
+
+/// One `search` entry as a directory; see [`directive_search`].
+fn expand_search_entry(entry: &str, origin: &Path, jq_origin: &Path) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME");
+    expand_search_entry_with(entry, home.as_deref().map(Path::new), origin, jq_origin)
+}
+
+/// [`expand_search_entry`] with `$HOME` given, so it can be tested without touching the
+/// environment.
+fn expand_search_entry_with(
+    entry: &str,
+    home: Option<&Path>,
+    origin: &Path,
+    jq_origin: &Path,
+) -> Option<PathBuf> {
+    if let Some(rest) = entry.strip_prefix("~/") {
+        // jq refuses a `~/` it cannot expand; here the entry finds nothing.
+        return Some(home?.join(rest));
+    }
+    if let Some(rest) = entry.strip_prefix("$ORIGIN/") {
+        Some(jq_origin.join(rest))
+    } else if Path::new(entry).is_absolute() {
+        Some(PathBuf::from(entry))
+    } else if entry == "." {
+        // Exactly `.` is the working directory, whatever file holds the directive.
+        Some(PathBuf::from("."))
+    } else {
+        Some(origin.join(entry))
+    }
 }
 
 /// Resolve a module path to a file path within `search_path`.
@@ -1185,10 +1275,14 @@ struct Directive<'a> {
     /// A data import (`import "f" as $d;`), read from `{path}.json` rather
     /// than loaded as a module.
     data: bool,
+    /// The directories its `search` metadata names in place of the default list (#5338).
+    search: Option<Vec<PathBuf>>,
 }
 
-/// `program`'s directives in jq's walk order: last-declared first.
-fn directives_of(program: &Program) -> Vec<Directive<'_>> {
+/// `program`'s directives in jq's walk order: last-declared first. `origin` is the directory
+/// of the file that holds them (the working directory for the main program), which a relative
+/// `search` entry is relative to.
+fn directives_of<'p>(program: &'p Program, origin: &Path, jq_origin: &Path) -> Vec<Directive<'p>> {
     let mut directives: Vec<Directive<'_>> = program
         .includes
         .iter()
@@ -1196,11 +1290,13 @@ fn directives_of(program: &Program) -> Vec<Directive<'_>> {
             decl_index: include.decl_index,
             path: &include.path,
             data: false,
+            search: directive_search(include.metadata.as_ref(), origin, jq_origin),
         })
         .chain(program.imports.iter().map(|import| Directive {
             decl_index: import.decl_index,
             path: &import.path,
             data: import.data,
+            search: directive_search(import.metadata.as_ref(), origin, jq_origin),
         }))
         .collect();
     directives.sort_by_key(|directive| core::cmp::Reverse(directive.decl_index));
@@ -1211,6 +1307,8 @@ fn directives_of(program: &Program) -> Vec<Directive<'_>> {
 /// (#3573). [`ModuleLoader::failure_report`] documents the rules this follows.
 struct FailureWalk<'a> {
     search_path: &'a [PathBuf],
+    /// jq's own directory, which a `search` entry's `$ORIGIN/` stands for (#5338).
+    jq_origin: &'a Path,
     /// The modules already reached, by canonical file, whether or not they
     /// failed: jq loads a module once, so a second path to it reports and
     /// counts nothing. Recorded when a module is finished, not when it starts,
@@ -1234,10 +1332,11 @@ impl FailureWalk<'_> {
     fn directives(&mut self, directives: &[Directive<'_>], dot_jq: Option<&Path>) -> usize {
         let mut errors = 0;
         for directive in directives {
+            let search = directive.search.as_deref().unwrap_or(self.search_path);
             let resolved = if directive.data {
-                resolve_data_file_in(self.search_path, directive.path)
+                resolve_data_file_in(search, directive.path)
             } else {
-                resolve_module_in(self.search_path, directive.path)
+                resolve_module_in(search, directive.path)
             };
             let Some(resolved) = resolved else {
                 // A missing module stops this level and returns `1` for it,
@@ -1299,14 +1398,20 @@ impl FailureWalk<'_> {
                 }));
                 1
             }
-            Ok(contents) => self.parsed_module(as_written, &canonical, contents),
+            Ok(contents) => self.parsed_module(as_written, file, &canonical, contents),
         };
         self.visited.insert(canonical);
         errors
     }
 
     /// [`Self::module`] for a module whose text was read.
-    fn parsed_module(&mut self, as_written: &str, canonical: &Path, contents: String) -> usize {
+    fn parsed_module(
+        &mut self,
+        as_written: &str,
+        file: &Path,
+        canonical: &Path,
+        contents: String,
+    ) -> usize {
         match jq::parse_program(&contents) {
             // A module that does not parse counts once, and its own directives
             // are never reached.
@@ -1321,7 +1426,12 @@ impl FailureWalk<'_> {
             Ok(program) => {
                 self.chain
                     .push((canonical.to_path_buf(), as_written.to_string()));
-                let errors = self.directives(&directives_of(&program), None);
+                let origin = file
+                    .parent()
+                    .filter(|dir| !dir.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
+                let errors =
+                    self.directives(&directives_of(&program, origin, self.jq_origin), None);
                 self.chain.pop();
                 errors
             }
@@ -1407,6 +1517,8 @@ impl ModuleLoader {
         Self {
             search_path,
             lib_dirs,
+            prog_origin: PathBuf::from("."),
+            jq_origin: PathBuf::from("."),
             loaded_modules: BTreeMap::new(),
             reachable_calls: BTreeMap::new(),
             auto_loaded_defs,
@@ -1418,6 +1530,39 @@ impl ModuleLoader {
             next_run_id: AUTO_LOAD_RUN_ID + 1,
             deps_of: BTreeMap::new(),
             top_ids: Vec::new(),
+        }
+    }
+
+    /// Tell the loader where the program and jq itself live, for the `search` metadata of
+    /// the main program's directives (#5338). Absent values leave the working directory.
+    pub fn set_origins(&mut self, prog_origin: Option<&str>, jq_origin: Option<&str>) {
+        if let Some(dir) = prog_origin {
+            self.prog_origin = PathBuf::from(dir);
+        }
+        if let Some(dir) = jq_origin {
+            self.jq_origin = PathBuf::from(dir);
+        }
+    }
+
+    /// `path` as a [`Target`] for a directive of the main program, or of the module whose
+    /// file is `module_file` (#5338).
+    fn target_in<'a>(
+        &self,
+        path: &'a str,
+        metadata: Option<&MetaObject>,
+        module_file: Option<&Path>,
+    ) -> Target<'a> {
+        let origin = match module_file {
+            Some(file) => file
+                .parent()
+                .filter(|dir| !dir.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf(),
+            None => self.prog_origin.clone(),
+        };
+        Target {
+            path,
+            search: directive_search(metadata, &origin, &self.jq_origin),
         }
     }
 
@@ -1435,8 +1580,8 @@ impl ModuleLoader {
     /// the caller is about to fail the load anyway, and a run id is only ever
     /// a diagnostic key, never a correctness one -- `scan_scope` pairs a
     /// begin with an end by nesting, not by id.
-    fn run_id_for(&mut self, module_path: &str) -> u32 {
-        let key = self.run_key(module_path);
+    fn run_id_for(&mut self, target: &Target<'_>) -> u32 {
+        let key = self.run_key(target);
         if let Some(&id) = self.run_ids.get(&key) {
             return id;
         }
@@ -1449,11 +1594,16 @@ impl ModuleLoader {
 
     /// The key [`Self::run_id_for`] interns `module_path` under: its
     /// canonical file, or the path as written when it cannot be resolved.
-    fn run_key(&self, module_path: &str) -> String {
-        resolve_module_in(&self.search_path, module_path).map_or_else(
-            || module_path.to_string(),
+    fn run_key(&self, target: &Target<'_>) -> String {
+        resolve_module_in(self.search_for(target), target.path).map_or_else(
+            || target.path.to_string(),
             |p| canonical_or_self(&p).to_string_lossy().into_owned(),
         )
+    }
+
+    /// The directories `target` is looked for in: its own `search` list, else the default.
+    fn search_for<'t>(&'t self, target: &'t Target<'_>) -> &'t [PathBuf] {
+        target.search.as_deref().unwrap_or(&self.search_path)
     }
 
     /// The canonical file a run id names, for compile-error attribution.
@@ -1477,14 +1627,17 @@ impl ModuleLoader {
     /// [`Self::load_and_bind_module`] for why that shape, rather than
     /// splicing the dependencies into the exported chain, is what real jq
     /// does.
-    fn ensure_module_loaded(&mut self, module_path: &str) -> Result<&FuncDefList, ModuleLoadError> {
+    fn ensure_module_loaded(
+        &mut self,
+        target: &Target<'_>,
+    ) -> Result<&FuncDefList, ModuleLoadError> {
         // Keyed by the canonical file (#2955), not `module_path` as written:
         // two spellings of the same module (`"dep"`, `"./dep"`) must share one
         // cache entry, or each distinct spelling pays its own full
         // parse-and-bind pass. `run_key` is the same canonicalize-or-fall-back
         // helper `run_id_for` interns run ids by, so this map and `run_ids`
         // agree on what "the same module" means.
-        let key = self.run_key(module_path);
+        let key = self.run_key(target);
 
         // `contains_key` -> load -> `insert` -> re-`get`, rather than the
         // `entry` spelling this used to have (#2865). `entry` holds a mutable
@@ -1495,7 +1648,7 @@ impl ModuleLoader {
         // recursion being possible at all. It is genuinely unreachable: the
         // insert immediately above it is unconditional on this path.
         if !self.loaded_modules.contains_key(&key) {
-            let (defs, reachable) = self.load_and_bind_module(module_path)?;
+            let (defs, reachable) = self.load_and_bind_module(target)?;
             self.loaded_modules.insert(key.clone(), defs);
             self.reachable_calls.insert(key.clone(), reachable);
         }
@@ -1554,14 +1707,16 @@ impl ModuleLoader {
     /// path verbatim is both the simple implementation and the faithful one.
     fn load_and_bind_module(
         &mut self,
-        module_path: &str,
+        target: &Target<'_>,
     ) -> Result<(FuncDefList, Vec<BTreeSet<String>>), ModuleLoadError> {
+        let module_path = target.path;
         // Resolve the module path
-        let file_path = resolve_module_in(&self.search_path, module_path).ok_or_else(|| {
-            ModuleLoadError::single(ReportEntry::NotFound {
-                module_path: module_path.to_string(),
-            })
-        })?;
+        let file_path =
+            resolve_module_in(self.search_for(target), module_path).ok_or_else(|| {
+                ModuleLoadError::single(ReportEntry::NotFound {
+                    module_path: module_path.to_string(),
+                })
+            })?;
 
         let canonical = canonical_or_self(&file_path);
         if let Some(at) = self.loading.iter().position(|(seen, _)| *seen == canonical) {
@@ -1594,7 +1749,7 @@ impl ModuleLoader {
             })
         })?;
 
-        let own_id = self.run_id_for(module_path);
+        let own_id = self.run_id_for(target);
         self.bind_parsed_module(
             program,
             &contents,
@@ -1610,7 +1765,9 @@ impl ModuleLoader {
     ///
     /// jq treats `~/.jq` as an `include` declared ahead of everything in the program, so
     /// its dependencies resolve on the default search list (the current directory, then
-    /// `-L`) and stay its own: like a module's, they are not visible to the main filter.
+    /// `-L`) unless one carries `search` metadata, whose relative entries are relative to
+    /// the `~/.jq` file's directory (#5338), and stay its own: like a module's, they are
+    /// not visible to the main filter.
     /// Run id [`AUTO_LOAD_RUN_ID`] is its own run, which is where those dependencies are
     /// linked from (see [`Self::walk_modules`]).
     fn bind_dot_jq(&mut self) -> Result<(), ModuleLoadError> {
@@ -1642,7 +1799,7 @@ impl ModuleLoader {
         own_id: u32,
     ) -> Result<(FuncDefList, Vec<BTreeSet<String>>), ModuleLoadError> {
         self.loading.push((canonical, as_written.to_string()));
-        let deps = self.module_dep_defs(&program, own_id);
+        let deps = self.module_dep_defs(&program, own_id, &file_path);
         self.loading.pop();
         let (deps, data_bindings) = deps?;
 
@@ -1789,6 +1946,7 @@ impl ModuleLoader {
         &mut self,
         program: &Program,
         own_id: u32,
+        module_file: &Path,
     ) -> Result<(DepGroups, Vec<(String, OwnedValue)>), ModuleLoadError> {
         let mut defs: DepGroups = Vec::new();
         // A module's own data imports, in source order -- see
@@ -1798,8 +1956,10 @@ impl ModuleLoader {
         let mut data_bindings: Vec<(String, OwnedValue)> = Vec::new();
 
         for include in &program.includes {
-            let id = self.run_id_for(&include.path);
-            let sigs = self.dependency_signatures(&include.path, id, own_id, include.decl_index)?;
+            let target =
+                self.target_in(&include.path, include.metadata.as_ref(), Some(module_file));
+            let id = self.run_id_for(&target);
+            let sigs = self.dependency_signatures(&target, id, own_id, include.decl_index)?;
             defs.push((id, None, sigs));
         }
 
@@ -1816,15 +1976,16 @@ impl ModuleLoader {
         // `load_and_bind_module` to bind into this module's own def bodies
         // (#2956).
         for import in &program.imports {
+            let target = self.target_in(&import.path, import.metadata.as_ref(), Some(module_file));
             if import.data {
                 data_bindings.push((
                     import.alias.clone(),
-                    load_data_import(&self.search_path, &import.path)?,
+                    load_data_import(self.search_for(&target), import.path.as_str())?,
                 ));
                 continue;
             }
-            let id = self.run_id_for(&import.path);
-            let sigs = self.dependency_signatures(&import.path, id, own_id, import.decl_index)?;
+            let id = self.run_id_for(&target);
+            let sigs = self.dependency_signatures(&target, id, own_id, import.decl_index)?;
             defs.push((id, Some(import.alias.clone()), sigs));
         }
 
@@ -1841,13 +2002,13 @@ impl ModuleLoader {
     /// here (see [`Self::module_dep_defs`]), not in true source order.
     fn dependency_signatures(
         &mut self,
-        module_path: &str,
+        target: &Target<'_>,
         id: u32,
         own_id: u32,
         decl_index: usize,
     ) -> Result<Vec<(String, Vec<Param>)>, ModuleLoadError> {
         let sigs = self
-            .ensure_module_loaded(module_path)?
+            .ensure_module_loaded(target)?
             .iter()
             .map(|(name, params, _)| (name.clone(), params.clone()))
             .collect();
@@ -2001,17 +2162,19 @@ impl ModuleLoader {
         // `includes` contribute *names*; `imports` are probed purely for
         // their failures.
         for include in &program.includes {
-            match self.ensure_module_loaded(&include.path) {
+            let target = self.target_in(&include.path, include.metadata.as_ref(), None);
+            match self.ensure_module_loaded(&target) {
                 Ok(defs) => names.extend(defs.iter().map(|(name, _, _)| name.clone())),
                 Err(e) => return Err(self.failure_report(program, e)),
             }
         }
         for import in &program.imports {
+            let target = self.target_in(&import.path, import.metadata.as_ref(), None);
             // Same data-import split the real loading path uses (#2865):
             // a data import reads `{path}.json`, not `{path}.jq`. Reading it
             // is `process_program`'s job; a missing file is found here.
             if import.data {
-                if resolve_data_file_in(&self.search_path, &import.path).is_none() {
+                if resolve_data_file_in(self.search_for(&target), &import.path).is_none() {
                     let missing = ModuleLoadError::single(ReportEntry::NotFound {
                         module_path: import.path.clone(),
                     });
@@ -2019,7 +2182,7 @@ impl ModuleLoader {
                 }
                 continue;
             }
-            if let Err(e) = self.ensure_module_loaded(&import.path) {
+            if let Err(e) = self.ensure_module_loaded(&target) {
                 return Err(self.failure_report(program, e));
             }
         }
@@ -2062,12 +2225,14 @@ impl ModuleLoader {
     fn failure_report(&self, program: &Program, first: ModuleLoadError) -> ModuleLoadError {
         let mut walk = FailureWalk {
             search_path: &self.search_path,
+            jq_origin: &self.jq_origin,
             visited: BTreeSet::new(),
             chain: Vec::new(),
             entries: Vec::new(),
             halted: false,
         };
-        let errors = walk.directives(&directives_of(program), self.dot_jq_path.as_deref());
+        let directives = directives_of(program, &self.prog_origin, &self.jq_origin);
+        let errors = walk.directives(&directives, self.dot_jq_path.as_deref());
         // The walk repeats the loader's resolution, parse and cycle checks, so
         // a directive the loader failed on is one it fails on too. If the two
         // ever drift apart, the loader's own report is the one to print: an
@@ -2137,16 +2302,18 @@ impl ModuleLoader {
         // it ends up innermost) and the whole includes block running before
         // the `~/.jq` block that follows it.
         for include in program.includes.iter().rev() {
-            if let Err(e) = self.ensure_module_loaded(&include.path) {
+            let target = self.target_in(&include.path, include.metadata.as_ref(), None);
+            if let Err(e) = self.ensure_module_loaded(&target) {
                 return Err(self.failure_report(program, e));
             }
-            let id = self.run_id_for(&include.path);
+            let id = self.run_id_for(&target);
             top_ids.push((include.decl_index, id));
             include_runs.push(id);
         }
 
         // Process imports (definitions available under namespace::)
         for import in &program.imports {
+            let target = self.target_in(&import.path, import.metadata.as_ref(), None);
             // A data import binds a `$`-variable rather than a namespace of
             // defs, so it contributes nothing to `top_ids`/`import_runs` --
             // its binding is recorded in `data_bindings` above instead, for
@@ -2154,16 +2321,16 @@ impl ModuleLoader {
             // (#2956). A load failure (missing file, unreadable, bad JSON)
             // ends the pass like any other directive's.
             if import.data {
-                match load_data_import(&self.search_path, &import.path) {
+                match load_data_import(self.search_for(&target), &import.path) {
                     Ok(value) => data_bindings.push((import.alias.clone(), value)),
                     Err(e) => return Err(self.failure_report(program, e)),
                 }
                 continue;
             }
-            if let Err(e) = self.ensure_module_loaded(&import.path) {
+            if let Err(e) = self.ensure_module_loaded(&target) {
                 return Err(self.failure_report(program, e));
             }
-            let id = self.run_id_for(&import.path);
+            let id = self.run_id_for(&target);
             top_ids.push((import.decl_index, id));
             import_runs.push((id, import.alias.as_str()));
         }
@@ -4298,6 +4465,11 @@ pub fn run_jq(mut args: JqCommand) -> Result<i32> {
     // that names an undefined function, and one that includes a missing module
     // are all "jq could not compile this program".
     let mut module_loader = ModuleLoader::new(&args.library_path);
+    let program_ctx = program_context(&args);
+    module_loader.set_origins(
+        program_ctx.prog_origin.as_deref(),
+        program_ctx.jq_origin.as_deref(),
+    );
     let module_lib_dirs = module_loader.lib_dirs().to_vec();
     jq::cli_context::set_module_resolver(move |name| module_meta_outcome(&module_lib_dirs, name));
 
@@ -11503,6 +11675,68 @@ mod tests {
         }
     }
 
+    /// #5338: how a directive's `search` metadata becomes a list of directories. The rows were
+    /// captured from jq 1.7.1; `~/` and `$ORIGIN/` cannot be pinned through the CLI, since the
+    /// first needs a `HOME` and the second jq's own directory.
+    #[test]
+    fn directive_search_expands_each_entry_like_jq_5338() {
+        let meta = |value: MetaValue| vec![("search".to_string(), value)];
+        let string = |text: &str| MetaValue::String(text.to_string());
+        let search = |value: MetaValue| {
+            directive_search(
+                Some(&meta(value)),
+                Path::new("mod/dir"),
+                Path::new("/opt/jq"),
+            )
+        };
+        let paths = |dirs: &[&str]| Some(dirs.iter().map(PathBuf::from).collect::<Vec<_>>());
+
+        // A string is a list of one; an array keeps its string entries.
+        assert_eq!(search(string("L1")), paths(&["mod/dir/L1"]));
+        assert_eq!(
+            search(MetaValue::Array(vec![
+                string("a"),
+                MetaValue::Number(1.0),
+                string("/abs"),
+                string("."),
+                string(""),
+                string("$ORIGIN/lib"),
+            ])),
+            paths(&["mod/dir/a", "/abs", ".", "mod/dir/", "/opt/jq/lib"])
+        );
+        // Anything else is an empty list, which finds nothing.
+        for value in [
+            MetaValue::Null,
+            MetaValue::Number(1.0),
+            MetaValue::Bool(true),
+            MetaValue::Object(Vec::new()),
+        ] {
+            assert_eq!(search(value), Some(Vec::new()));
+        }
+        // No `search` key, or no metadata at all, leaves the default list.
+        let other = vec![("other".to_string(), MetaValue::Null)];
+        assert_eq!(
+            directive_search(Some(&other), Path::new("."), Path::new(".")),
+            None
+        );
+        assert_eq!(directive_search(None, Path::new("."), Path::new(".")), None);
+    }
+
+    /// #5338: `~/` is `$HOME`, and finds nothing where there is none.
+    #[test]
+    fn home_relative_search_entry_needs_home_5338() {
+        let expand = |home: Option<&str>| {
+            expand_search_entry_with("~/lib", home.map(Path::new), Path::new("."), Path::new("."))
+        };
+        assert_eq!(expand(Some("/h")), Some(PathBuf::from("/h/lib")));
+        assert_eq!(expand(None), None);
+        // Only a leading `~/` is special.
+        assert_eq!(
+            expand_search_entry_with("~lib", None, Path::new("o"), Path::new(".")),
+            Some(PathBuf::from("o/~lib"))
+        );
+    }
+
     /// #5154: the named-variable flags apply in argv order and a name keeps its first value.
     mod named_flag_order_5154 {
         use super::*;
@@ -11851,11 +12085,11 @@ mod tests {
         #[test]
         fn unresolvable_module_still_gets_a_stable_id() {
             let mut loader = ModuleLoader::new(&[]);
-            let first = loader.run_id_for("no-such-module-anywhere");
-            let again = loader.run_id_for("no-such-module-anywhere");
+            let first = loader.run_id_for(&Target::plain("no-such-module-anywhere"));
+            let again = loader.run_id_for(&Target::plain("no-such-module-anywhere"));
             assert_eq!(first, again, "the same path must intern to one id");
 
-            let other = loader.run_id_for("a-different-missing-module");
+            let other = loader.run_id_for(&Target::plain("a-different-missing-module"));
             assert_ne!(first, other, "distinct paths get distinct ids");
 
             // `~/.jq`'s reserved id is never handed out to a module.
@@ -12147,8 +12381,12 @@ mod tests {
             .expect("write s2");
 
             let mut loader = ModuleLoader::new(&[dir.path().to_path_buf()]);
-            loader.ensure_module_loaded("s1").expect("load s1");
-            loader.ensure_module_loaded("s2").expect("load s2");
+            loader
+                .ensure_module_loaded(&Target::plain("s1"))
+                .expect("load s1");
+            loader
+                .ensure_module_loaded(&Target::plain("s2"))
+                .expect("load s2");
 
             assert_eq!(
                 loader.loaded_modules.len(),
