@@ -6051,6 +6051,23 @@ fn clear_head_foot(node: &mut CommentTree, head: bool, foot: bool) {
     *node.meta_mut() = meta.with_head_foot(kept_head, kept_foot);
 }
 
+/// The top-level pipe stages of `expr`, looking through a parenthesised pipe only.
+fn flatten_plain_pipe<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
+    match expr {
+        Expr::Pipe(stages) => stages.iter().for_each(|s| flatten_plain_pipe(s, out)),
+        Expr::Paren(inner) if matches!(**inner, Expr::Pipe(_)) => flatten_plain_pipe(inner, out),
+        other => out.push(other),
+    }
+}
+
+/// `parts` as one expression: the stage itself, or the pipe of them.
+fn pipe_of(parts: &[&Expr]) -> Expr {
+    match parts {
+        [one] => (*one).clone(),
+        many => Expr::Pipe(many.iter().map(|e| (*e).clone()).collect()),
+    }
+}
+
 /// `expr` as a write followed by a *static navigation* tail (`.a.b = "y" | .a`), split into the
 /// write prefix, the tail, and the [`TreeStep`] path the tail walks (#2706); `None` for any other
 /// shape.
@@ -6061,15 +6078,8 @@ fn clear_head_foot(node: &mut CommentTree, head: bool, foot: bool) {
 /// which the cursor path already answers with the source's presentation, and a navigation in the
 /// *middle* of the pipe (`.a.b = "y" | .a | .f = 2`) stays on today's route.
 fn split_trailing_static_nav(expr: &Expr) -> Option<(Expr, Expr, Vec<TreeStep<'_>>)> {
-    fn flatten<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
-        match expr {
-            Expr::Pipe(stages) => stages.iter().for_each(|s| flatten(s, out)),
-            Expr::Paren(inner) if matches!(**inner, Expr::Pipe(_)) => flatten(inner, out),
-            other => out.push(other),
-        }
-    }
     let mut stages = Vec::new();
-    flatten(expr, &mut stages);
+    flatten_plain_pipe(expr, &mut stages);
     let split = stages
         .iter()
         .rposition(|stage| static_nav_steps(stage).is_none())?
@@ -6078,10 +6088,6 @@ fn split_trailing_static_nav(expr: &Expr) -> Option<(Expr, Expr, Vec<TreeStep<'_
         return None;
     }
     let (head, tail) = stages.split_at(split);
-    let pipe_of = |parts: &[&Expr]| match parts {
-        [one] => (*one).clone(),
-        many => Expr::Pipe(many.iter().map(|e| (*e).clone()).collect()),
-    };
     let prefix = pipe_of(head);
     if !is_alias_sensitive_assign(&prefix) {
         return None;
@@ -6103,16 +6109,9 @@ fn split_trailing_static_nav(expr: &Expr) -> Option<(Expr, Expr, Vec<TreeStep<'_
 /// presentation tree of the navigated subtree, which is what the write pass needs and the whole
 /// document's route cannot give it (`is_alias_sensitive_assign` takes no navigation stage).
 /// The rest must itself be a presentation-preserving write.
-fn split_leading_static_nav(expr: &Expr) -> Option<(Expr, Expr)> {
-    fn flatten<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
-        match expr {
-            Expr::Pipe(stages) => stages.iter().for_each(|s| flatten(s, out)),
-            Expr::Paren(inner) if matches!(**inner, Expr::Pipe(_)) => flatten(inner, out),
-            other => out.push(other),
-        }
-    }
+fn split_leading_static_nav(expr: &Expr) -> Option<(Expr, Expr, Vec<TreeStep<'_>>)> {
     let mut stages = Vec::new();
-    flatten(expr, &mut stages);
+    flatten_plain_pipe(expr, &mut stages);
     let lead = stages
         .iter()
         .take_while(|stage| static_nav_steps(stage).is_some_and(|steps| !steps.is_empty()))
@@ -6124,12 +6123,78 @@ fn split_leading_static_nav(expr: &Expr) -> Option<(Expr, Expr)> {
     if reachable_meta_assigns(rest) == 0 {
         return None;
     }
-    let pipe_of = |parts: &[&Expr]| match parts {
-        [one] => (*one).clone(),
-        many => Expr::Pipe(many.iter().map(|e| (*e).clone()).collect()),
-    };
     let rest = pipe_of(rest);
-    is_alias_sensitive_assign(&rest).then(|| (pipe_of(nav), rest))
+    // What a write reads of the node it is on (`key`, `path`, `parent`, `line`, a comment) is
+    // answered from the node's place in the document, which the navigated snapshot has not got.
+    if reads_node_context(&rest) || !is_alias_sensitive_assign(&rest) {
+        return None;
+    }
+    let steps = nav
+        .iter()
+        .filter_map(|stage| static_nav_steps(stage))
+        .flatten()
+        .collect();
+    Some((pipe_of(nav), rest, steps))
+}
+
+/// Whether `expr` asks a node about where it sits or what presentation it carries (#2679): its
+/// key, path, parent, position, or its comment, style, anchor or tag. A metadata write resolved
+/// on a navigated node cannot answer these, so a write behind a navigation that uses one stays
+/// refused instead of printing the wrong text.
+fn reads_node_context(expr: &Expr) -> bool {
+    jq::walk::contains_builtin(expr, |b| {
+        matches!(
+            b,
+            Builtin::Path(_)
+                | Builtin::PathNoArg
+                | Builtin::Paths
+                | Builtin::PathsFilter(_)
+                | Builtin::LeafPaths
+                | Builtin::Parent
+                | Builtin::ParentN(_)
+                | Builtin::Key
+                | Builtin::Line
+                | Builtin::Column
+                | Builtin::DocumentIndex
+                | Builtin::FileIndex
+                | Builtin::Filename
+                | Builtin::InputLineNumber
+                | Builtin::Tag
+                | Builtin::Anchor
+                | Builtin::Style
+                | Builtin::LineComment
+                | Builtin::HeadComment
+                | Builtin::FootComment
+        )
+    })
+}
+
+/// The node `steps` reach in `value`, with the presentation tree of that node, as a result of
+/// navigating to it prints it: a mapping value shows neither the standalone comments above and
+/// below it (they print with its key), and a scalar has none of its own either.
+/// `None` when the document has no such node.
+fn descend_value_and_tree(
+    value: &OwnedValue,
+    tree: &CommentTree,
+    steps: &[TreeStep<'_>],
+) -> Option<(OwnedValue, CommentTree)> {
+    let node = owned_value_at(value, &meta_path_of(steps))?;
+    let mut sub = steps
+        .iter()
+        .fold(tree, |node, step| match step {
+            TreeStep::Key(k) => node.field(k),
+            TreeStep::Index(i) => node.at_index(*i),
+        })
+        .clone();
+    if matches!(steps.last(), Some(TreeStep::Key(_))) {
+        *sub.meta_mut() = sub.meta().with_head_foot(Vec::new(), Vec::new());
+    }
+    if !matches!(node, OwnedValue::Object(_) | OwnedValue::Array(_)) {
+        // The standalone lines around a scalar belong to its parent; its spelling (`~`) and its
+        // own trailing comment stay, for the write to build on (the result drops the style, #852).
+        *sub.meta_mut() = sub.meta().with_head_foot(Vec::new(), Vec::new());
+    }
+    Some((node.clone(), sub))
 }
 
 /// `steps` as the owned [`MetaPathStep`] path [`owned_value_at`] walks.
@@ -6162,20 +6227,29 @@ fn evaluate_yaml_cursor<W: AsRef<[u64]> + Clone>(
     sort_keys: bool,
 ) -> Result<Vec<ResultWithComments>> {
     // A metadata write behind a static navigation (#2679) is the write on the navigated node,
-    // run as the document it is: only when the node is there to be navigated to.
-    if need_comments {
-        if let Some((nav, rest)) = split_leading_static_nav(expr) {
+    // run as the document it is: only when the node is there to be navigated to. The presentation
+    // it starts from is the parent walk's own, which holds what only the walk can see (a comment
+    // after a sequence item's `-`), not a snapshot taken from the node alone.
+    if need_comments || writes_tag(expr) {
+        if let Some((nav, rest, steps)) = split_leading_static_nav(expr) {
             if let GenericResult::OneCursor(navigated) =
                 eval_with_cursor_using::<YqSemantics, _>(&nav, cursor)
             {
-                return evaluate_yaml_cursor(
-                    navigated,
-                    &rest,
-                    sink,
-                    need_comments,
-                    strip_style,
-                    sort_keys,
-                );
+                let whole =
+                    to_owned_with_comments::<_, YqSemantics>(&cursor.value(), Some(&cursor));
+                if let Some(whole) = sink.materialize(DiagStyle::Yq, whole, &no_location()) {
+                    if let Some(sub) = descend_value_and_tree(&whole.0, &whole.1, &steps) {
+                        return evaluate_yaml_cursor_core(
+                            navigated,
+                            &rest,
+                            sink,
+                            need_comments,
+                            strip_style,
+                            sort_keys,
+                            Some(sub),
+                        );
+                    }
+                }
             }
         }
     }
@@ -6192,11 +6266,19 @@ fn evaluate_yaml_cursor<W: AsRef<[u64]> + Clone>(
             need_comments,
             strip_style,
             sort_keys,
+            None,
         );
     };
     let has_aliases = cursor.index().has_aliases();
-    let docs =
-        evaluate_yaml_cursor_core(cursor, &prefix, sink, need_comments, strip_style, sort_keys)?;
+    let docs = evaluate_yaml_cursor_core(
+        cursor,
+        &prefix,
+        sink,
+        need_comments,
+        strip_style,
+        sort_keys,
+        None,
+    )?;
     let path = meta_path_of(&steps);
     let mut out = Vec::with_capacity(docs.len());
     for (value, tree) in docs {
@@ -6292,6 +6374,7 @@ fn evaluate_yaml_cursor_core<W: AsRef<[u64]> + Clone>(
     need_comments: bool,
     strip_style: bool,
     sort_keys: bool,
+    pristine_override: Option<(OwnedValue, CommentTree)>,
 ) -> Result<Vec<ResultWithComments>> {
     // Snapshot alias-sync context from the pristine document *before*
     // evaluation, only when it could possibly matter (#711): an
@@ -6331,8 +6414,10 @@ fn evaluate_yaml_cursor_core<W: AsRef<[u64]> + Clone>(
     // evaluation finishes.
     let presentation_sync_ctx = match ((need_comments || writes_tag(expr))
         && is_alias_sensitive_assign(expr))
-    .then(|| to_owned_with_comments::<_, YqSemantics>(&cursor.value(), Some(&cursor)))
-    {
+    .then(|| match pristine_override {
+        Some(sub) => Ok(sub),
+        None => to_owned_with_comments::<_, YqSemantics>(&cursor.value(), Some(&cursor)),
+    }) {
         Some(snapshot) => {
             let Some(snapshot) = sink.materialize(DiagStyle::Yq, snapshot, &no_location()) else {
                 return Ok(Vec::new());
@@ -6373,18 +6458,20 @@ fn evaluate_yaml_cursor_core<W: AsRef<[u64]> + Clone>(
             );
             return Ok(Vec::new());
         }
-        // The same refusal for a write behind a navigation (#2679): `.a | .b line_comment =
-        // "x"` places the comment on a node of the *navigated* subtree, which this route has
-        // no tree for, and it was dropped without a word -- the outcome #798's own triage ruled
-        // out. Only that shape: a write that a later stage replaces (`.a style = "double" |
-        // .a + 1`) has nothing to lose.
+        // The same refusal for a write behind a navigation (#2679) that
+        // `evaluate_yaml_cursor` did not take (a path to one existing node whose write reads no
+        // context of its own): `.[] | .b line_comment = "x"` places the comment on a node of a
+        // *navigated* subtree, which this route has no tree for, and it was dropped without a
+        // word -- the outcome #798's own triage ruled out. Only that shape: a write that a
+        // later stage replaces (`.a style = "double" | .a + 1`) has nothing to lose.
         None if need_comments && meta_write_behind_navigation(expr) => {
             sink.report(
                 DiagStyle::Yq,
                 &EvalError::new(
                     "metadata assignment (line_comment/style/anchor = ...) is not supported \
-                     behind a navigation stage (`.a | .b line_comment = ...`) or a stage that \
-                     calls a `def` (#2679)",
+                     behind a navigation that is not a path to one existing node (`.a.b`, \
+                     `.[0]`), one that reads the node's own context (`key`, `path`, `line`, a \
+                     comment), or a stage that calls a `def` (#2679)",
                 ),
                 &no_location(),
             );

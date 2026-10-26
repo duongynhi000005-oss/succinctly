@@ -47,6 +47,25 @@ fn test_write_behind_static_navigation_keeps_the_subtree_presentation_2679() -> 
             "a:\n  b: 1 # old\n  c: 2\n",
             "b: 1\nc: 2\n",
         ),
+        // A comment after a sequence item's `-` belongs to the item, which the write keeps.
+        (
+            ".[0] | .b line_comment = \"x\"",
+            "- # c\n  b: 1\n- z\n",
+            "# c\nb: 1 # x\n",
+        ),
+        (
+            ".[0] | .b style = \"double\"",
+            "- # c\n  b: 1 # old\n- z\n",
+            "# c\nb: \"1\" # old\n",
+        ),
+        (
+            ".[0] | .[0] line_comment = \"x\"",
+            "- # c\n  - 1\n  - 2\n",
+            "# c\n- 1 # x\n- 2\n",
+        ),
+        // A scalar keeps its source spelling.
+        (".a | . style = \"flow\"", "a: ~\n", "~\n"),
+        (".a | . line_comment = \"x\"", "a: ~ # n\n", "~\n"),
         // A write after another write in the navigated document.
         (
             ".a | .z = 9 | .b line_comment = \"n\"",
@@ -74,6 +93,40 @@ fn test_write_behind_absent_or_fanning_navigation_is_refused_2679() -> Result<()
         assert_eq!((out.as_str(), code), ("", 1), "{filter}: {err}");
         assert!(err.contains("#2679"), "{filter}: {err}");
     }
+    Ok(())
+}
+
+/// A write whose text is read from the node it is on (`key`, `line`, `path`, a comment) is
+/// answered from the node's place in the document, which the navigated route has not got, so it
+/// is refused rather than printed with the wrong text (yq prints `b: 1 # a` for the first).
+#[test]
+fn test_write_reading_the_nodes_own_context_behind_navigation_is_refused_2679() -> Result<()> {
+    for filter in [
+        ".a | .b line_comment = (key)",
+        ".a | .b line_comment = (path | join(\".\"))",
+        ".a | .b line_comment = (line | tostring)",
+        ".a | .b line_comment = (parent | tag)",
+        ".a | .b line_comment = (.b | line_comment)",
+    ] {
+        let (out, err, code) = run_yq_stdin_with_stderr(filter, "a:\n  b: 1\nz: 2\n", &[])?;
+        assert_eq!((out.as_str(), code), ("", 1), "{filter}: {err}");
+        assert!(err.contains("#2679"), "{filter}: {err}");
+    }
+    Ok(())
+}
+
+/// `tag` is the one metadata slot that changes JSON output, so it applies behind a navigation
+/// there too.
+#[test]
+fn test_tag_write_behind_navigation_applies_to_json_output_2679() -> Result<()> {
+    let (out, code) = run_yq_stdin(
+        ".a | .b tag = \"!!str\"",
+        "a:\n  b: 1\n",
+        &["-o", "json", "-I0"],
+    )?;
+    assert_eq!((out.trim(), code), (r#"{"b":"1"}"#, 0));
+    let (out, code) = run_yq_stdin(".a | .b tag = \"!!str\"", "a:\n  b: 1\n", &[])?;
+    assert_eq!((out.as_str(), code), ("b: \"1\"\n", 0));
     Ok(())
 }
 

@@ -5744,6 +5744,7 @@ Four known gaps this write shares with every other write form, none specific to 
 - **A metadata write behind a navigation that is not a static path is refused, where real yq applies it**:
   `.a[] | .b line_comment = "hi"` on `a:\n  - b: 1\n` prints `b: 1 # hi` in yq (live-verified) and raises here (#2679).
   A static path (`.a`, `.a.b`, `.[0]`, a pipe of them) is applied: the rest of the pipe runs on the navigated node as a document of its own, with that subtree's presentation, as `.a | .b line_comment = "hi"` does in yq.
+  A write that reads the node's own context (`.a | .b line_comment = (key)`, `path`, `parent`, `line`, `column`, a comment, style, anchor or tag) is refused as well, since the navigated snapshot cannot answer it.
   A path whose node is absent (`.zz | .b line_comment = "x"`, where yq writes onto the `null` it leaves) and a navigation that answers several nodes (`.[]`, `.a[]`) are refused.
   `resolve_meta_assign_writes` only runs when the whole expression passes `is_shape_preserving` (`src/jq/eval.rs`), whose fixed operator list has no bare navigation stage, and a write after one belongs on the navigated subtree, which no route here has a presentation tree for.
   Such a write used to exit 0 with the write silently dropped, the outcome #798's triage ruled out; the refusal is the divergence ADR-0018 allows when matching would discard a write.
