@@ -6100,9 +6100,9 @@ fn split_trailing_static_nav(expr: &Expr) -> Option<(Expr, Expr, Vec<TreeStep<'_
     Some((prefix, pipe_of(tail), steps))
 }
 
-/// `expr` as a *static navigation* followed by a pipeline that holds a metadata write
-/// (`.a.b | .c line_comment = "x"`), split into the navigation and the rest (#2679); `None` for
-/// any other shape.
+/// `expr` as a *static navigation* followed by a pipeline that holds a write
+/// (`.a.b | .c line_comment = "x"`, `.a | .b = 5`), split into the navigation and the rest
+/// (#2679, #5286); `None` for any other shape.
 ///
 /// A static navigation (`.a`, `.a.b`, `.[0]`, see [`static_nav_steps`]) answers one node, so the
 /// rest of the pipe is the same query run on that node as its own document: it has the
@@ -6120,10 +6120,17 @@ fn split_leading_static_nav(expr: &Expr) -> Option<(Expr, Expr, Vec<TreeStep<'_>
         return None;
     }
     let (nav, rest) = stages.split_at(lead);
-    if reachable_meta_assigns(rest) == 0 {
+    let rest = pipe_of(rest);
+    if !holds_write(&rest) {
         return None;
     }
-    let rest = pipe_of(rest);
+    // A metadata write that is not a pipe stage of the rest (inside another write's right side,
+    // say) is the refusal's to report, not this route's.
+    let mut stages = Vec::new();
+    flatten_pipe_stages(&rest, &mut stages);
+    if reachable_meta_assigns(&stages) != count_meta_assigns(&rest) {
+        return None;
+    }
     // What a write reads of the node it is on (`key`, `path`, `parent`, `line`, a comment) is
     // answered from the node's place in the document, which the navigated snapshot has not got.
     if reads_node_context(&rest) || !is_alias_sensitive_assign(&rest) {
@@ -6135,6 +6142,24 @@ fn split_leading_static_nav(expr: &Expr) -> Option<(Expr, Expr, Vec<TreeStep<'_>
         .flatten()
         .collect();
     Some((pipe_of(nav), rest, steps))
+}
+
+/// Whether `expr` writes anything: an assignment of any kind, a metadata write, `del`,
+/// `setpath`, `delpaths` or `sort_keys(f)` (#2679, #5286). A navigation followed by a plain read
+/// is answered by the cursor with the source's own presentation and takes no part in this.
+fn holds_write(expr: &Expr) -> bool {
+    jq::walk::any_subexpr(expr, &mut |e| match e {
+        Expr::Assign { .. }
+        | Expr::Update { .. }
+        | Expr::CompoundAssign { .. }
+        | Expr::AlternativeAssign { .. }
+        | Expr::MetaAssign { .. } => true,
+        Expr::Builtin(b) => matches!(
+            b,
+            Builtin::Del(_) | Builtin::SetPath(..) | Builtin::DelPaths(_) | Builtin::SortKeys(_)
+        ),
+        _ => false,
+    })
 }
 
 /// Whether `expr` asks a node about where it sits or what presentation it carries (#2679): its
@@ -6226,8 +6251,9 @@ fn evaluate_yaml_cursor<W: AsRef<[u64]> + Clone>(
     strip_style: bool,
     sort_keys: bool,
 ) -> Result<Vec<ResultWithComments>> {
-    // A metadata write behind a static navigation (#2679) is the write on the navigated node,
-    // run as the document it is: only when the node is there to be navigated to. The presentation
+    // A write behind a static navigation (#2679 for a metadata write, #5286 for any other) is the
+    // write on the navigated node, run as the document it is: only when the node is there to be
+    // navigated to. The presentation
     // it starts from is the parent walk's own, which holds what only the walk can see (a comment
     // after a sequence item's `-`), not a snapshot taken from the node alone.
     //
@@ -6239,12 +6265,20 @@ fn evaluate_yaml_cursor<W: AsRef<[u64]> + Clone>(
             if let GenericResult::OneCursor(navigated) =
                 eval_with_cursor_using::<YqSemantics, _>(&nav, cursor)
             {
-                let whole =
-                    to_owned_with_comments::<_, YqSemantics>(&cursor.value(), Some(&cursor));
-                let Some(whole) = sink.materialize(DiagStyle::Yq, whole, &no_location()) else {
-                    return Ok(Vec::new());
+                // A sequence item may carry a comment after its `-`, which the walk of the
+                // sequence holds and the item's own cursor does not: snapshot from the document
+                // and slice. Any other node is its own snapshot.
+                let pristine = if navigated.dash_wrapper_comment().is_some() {
+                    let whole =
+                        to_owned_with_comments::<_, YqSemantics>(&cursor.value(), Some(&cursor));
+                    let Some(whole) = sink.materialize(DiagStyle::Yq, whole, &no_location()) else {
+                        return Ok(Vec::new());
+                    };
+                    descend_value_and_tree(&whole.0, &whole.1, &steps).map(Some)
+                } else {
+                    Some(None)
                 };
-                if let Some(sub) = descend_value_and_tree(&whole.0, &whole.1, &steps) {
+                if let Some(pristine) = pristine {
                     return evaluate_yaml_cursor_core(
                         navigated,
                         &rest,
@@ -6252,7 +6286,7 @@ fn evaluate_yaml_cursor<W: AsRef<[u64]> + Clone>(
                         need_comments,
                         strip_style,
                         sort_keys,
-                        Some(sub),
+                        pristine,
                     );
                 }
             }

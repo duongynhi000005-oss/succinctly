@@ -60525,22 +60525,19 @@ fn test_yq_sort_keys_builtin_2855() -> Result<()> {
 /// #2855 control: values compose correctly with a preceding pipe stage
 /// (`.a | sort_keys(.)` correctly reorders `.a`'s own keys and returns just
 /// `.a`, matching real yq's `z: 2\ny: [3, {q: 1, p: 2}]`) -- but *not* the
-/// flow style on `y`, since `.a` (a bare navigation stage before the write)
-/// isn't in `is_shape_preserving`'s fixed operator list. That's the
-/// pre-existing, already-tracked gap ("navigation after the write drops the
-/// presentation", and #2679's refusal of a metadata write behind a
-/// navigation stage) applying here for the first time to a *value*, not
-/// just comments -- confirmed this isn't
-/// new or sort_keys-specific: `.a | (.z = 3)` already loses the identical
-/// `.y` flow style on plain `main`, unrelated to this issue. Documented
-/// beside the other #2679 rows in `docs/compliance/yq/limitations.md`.
+/// flow style on `y`, which used to be lost because `.a` (a bare navigation
+/// stage before the write) isn't in `is_shape_preserving`'s fixed operator
+/// list (#2679 recorded it beside its own rows; `.a | (.z = 3)` lost the
+/// identical `.y` flow style). A write behind a static navigation now runs on
+/// the navigated node with the subtree's own presentation (#5286), so the
+/// flow style stays, as real yq prints it.
 #[test]
 fn test_yq_sort_keys_composes_with_pipe_2855() -> Result<()> {
     let input = "b: 1\na:\n  z: 2\n  y: [3, {q: 1, p: 2}]\n";
     let (out, code) = run_yq_stdin(".a | sort_keys(.)", input, &[])?;
     assert_eq!(code, 0, "out={out:?}");
-    // real yq: "z: 2\ny: [3, {q: 1, p: 2}]\n" -- flow style kept.
-    assert_eq!(out.trim_end(), "y:\n  - 3\n  - q: 1\n    p: 2\nz: 2");
+    // real yq (v4.53.3): flow style kept.
+    assert_eq!(out, "y: [3, {q: 1, p: 2}]\nz: 2\n");
     Ok(())
 }
 
