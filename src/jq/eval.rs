@@ -22591,7 +22591,8 @@ fn format_html<S: EvalSemantics>(value: &OwnedValue, _optional: bool) -> Result<
             b'>' => "&gt;",
             b'&' => "&amp;",
             b'"' => "&quot;",
-            b'\'' => "&#39;",
+            // jq 1.7.1 spells it `&apos;`, not `&#39;` (#5297).
+            b'\'' => "&apos;",
             _ => continue,
         };
         if start < i {
@@ -119678,7 +119679,7 @@ mod tests {
     fn test_format_html() {
         query!(br#""<script>alert('xss')</script>""#, "@html",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;");
+                assert_eq!(s, "&lt;script&gt;alert(&apos;xss&apos;)&lt;/script&gt;");
             }
         );
     }
