@@ -1875,7 +1875,11 @@ impl ModuleLoader {
             // ends the pass like any other directive's.
             if import.data {
                 match load_data_import(&self.search_path, &import.path) {
-                    Ok(value) => data_bindings.push((import.alias.clone(), value)),
+                    // jq binds a data import under both `$alias` and `$alias::alias` (#5295).
+                    Ok(value) => {
+                        data_bindings.push((format!("{0}::{0}", import.alias), value.clone()));
+                        data_bindings.push((import.alias.clone(), value));
+                    }
                     Err(e) => return Err(self.failure_report(program, e)),
                 }
                 continue;
