@@ -18,11 +18,28 @@ fn test_a_document_empty_mapping_element_joins_as_empty_1791() -> Result<()> {
         ("- {}\n- {}\n", "join(\",\")", ","),
         ("- {}\n- b\n- {}\n", "join(\"-\")", "-b-"),
         ("- {\"a\":1}\n- {}\n", "join(\",\")", ","),
-        ("- [{}]\n- x\n", "join(\",\")", ",x"),
         ("- {}\n- x\n", ". as $d | $d | join(\",\")", ",x"),
+        // Reached from the document by a computed route.
+        ("- {}\n- b\n", "[.[0]] | join(\",\")", ""),
+        ("- {}\n- b\n", ".[0] as $x | [$x] | join(\",\")", ""),
+        ("- {}\n- b\n", "[{\"a\":1} | del(.a)] | join(\",\")", ""),
+        ("- {}\n- b\n", "[.[]] | join(\",\")", ",b"),
+        ("- {}\n- b\n", "map(.) | join(\",\")", ",b"),
     ] {
         let (out, code) = run_yq_stdin(filter, input, &["-r"])?;
         assert_eq!((out.trim_end(), code), (want, 0), "{filter} on {input:?}");
+    }
+    Ok(())
+}
+
+/// Not matched, pinned so a change is noticed (docs/compliance/yq/limitations.md): yq writes the
+/// literal `{}` element as the text `{}` (`[{}] | join(",")` is `{}`, `[{}, 1] | join("-")` is
+/// `{}-1`), and this route cannot tell it from a document `{}`.
+#[test]
+fn test_a_literal_empty_mapping_element_is_not_matched_1791() -> Result<()> {
+    for (filter, want) in [("[{}] | join(\",\")", ""), ("[{}, 1] | join(\"-\")", "-1")] {
+        let (out, code) = run_yq_stdin(filter, "", &["-n", "-r"])?;
+        assert_eq!((out.trim_end(), code), (want, 0), "{filter}");
     }
     Ok(())
 }

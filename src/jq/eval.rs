@@ -19439,14 +19439,15 @@ fn yq_join_element_part(elem: OwnedValue) -> String {
     }
     match elem {
         OwnedValue::String(s) => s.into_string(),
-        // NOT a `OwnedValue::Object(m) if m.is_empty()` guard here (#1047
-        // review): `elem` was already collapsed via `to_owned_key_shape` at
-        // the call site (see this function's own doc comment), which always
-        // produces an *empty* `IndexMap` regardless of the real object's
-        // actual field count -- a guard here couldn't tell "genuinely
-        // empty" apart from "collapsed, contents unread". The empty-object
-        // special case is instead handled at the call site, on the live
-        // cursor, before that collapse ever runs.
+        // No `OwnedValue::Object(m) if m.is_empty()` arm here: `elem` was already
+        // collapsed via `to_owned_key_shape` at the call site (see this
+        // function's own doc comment), which always produces an *empty*
+        // `IndexMap` regardless of the real object's field count, so an arm
+        // could not tell "genuinely empty" from "collapsed, contents
+        // unread". An empty object is the empty string like any other
+        // container (#1791; the text `{}` is only yq's spelling of an
+        // expression's own `{}` literal, which this route cannot tell from
+        // a document one).
         OwnedValue::Null | OwnedValue::Array(_) | OwnedValue::Object(_) => String::new(),
         // Bool is unaffected either way (`to_json_yq()` and
         // `numeric_display_string` agree on `"true"`/`"false"`); kept on
