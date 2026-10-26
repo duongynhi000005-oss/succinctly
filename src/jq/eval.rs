@@ -22914,7 +22914,15 @@ pub(super) fn tonumber_from_str(s: &str, yq_mode: bool) -> Result<OwnedValue, Ev
     // yq's `tonumber` does *no* trimming at all (`" 1 "`/`"1 "`/`"\t1"` all
     // error) -- yq mode must see the untouched string here, not jq's
     // trimmed one (#2960).
-    let trimmed = if yq_mode { s } else { s.trim() };
+    //
+    // jq's parser also skips one UTF-8 BOM before the whitespace (#5312), so `"\u{feff}1"` is 1;
+    // a doubled one, or one behind whitespace, is refused. The errors below still name `s`, BOM
+    // and all, as jq does.
+    let trimmed = if yq_mode {
+        s
+    } else {
+        s.strip_prefix('\u{feff}').unwrap_or(s).trim()
+    };
     // Materialize a JSON-shaped number as a `NumberLiteral` so it keeps its
     // *source spelling*, rather than collapsing it through a bare
     // `parse::<i64>()`/`parse::<f64>()` pair. Both oracles preserve the
@@ -23657,6 +23665,9 @@ fn builtin_fromjson<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 fn parse_complete_json(s: &str, yq_mode: bool) -> Result<OwnedValue, String> {
     let bytes = s.as_bytes();
     if !yq_mode {
+        // #5312: jq's parser skips one UTF-8 BOM at the front of the text, as it does for its
+        // input stream (#5291); a second one, or one behind whitespace, is still refused.
+        let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
         // #3032: use the same jq accept-set and literal-preserving decoder as
         // --argjson. Validation must precede semi-indexing: the index alone
         // does not check JSON grammar or guarantee one complete value.

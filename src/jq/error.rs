@@ -1715,12 +1715,15 @@ impl EvalError {
     /// from jq that succinctly does not reproduce; see
     /// `docs/compliance/jq/limitations.md`.
     pub fn invalid_numeric_literal(text: &str) -> Self {
-        if text.is_empty() {
-            return Self::new("Expected JSON value (while parsing '')");
+        // jq's parser skips a leading BOM before it counts a column (#5312), but the message
+        // still quotes the text whole.
+        let counted = text.strip_prefix('\u{feff}').unwrap_or(text);
+        if counted.is_empty() {
+            return Self::new(format!("Expected JSON value (while parsing '{text}')"));
         }
         Self::new(format!(
             "Invalid numeric literal at EOF at line 1, column {} (while parsing '{text}')",
-            text.len()
+            counted.len()
         ))
     }
 
@@ -2201,6 +2204,23 @@ mod tests {
         assert_eq!(
             EvalError::invalid_numeric_literal("").message,
             "Expected JSON value (while parsing '')"
+        );
+    }
+
+    /// #5312: the column starts after a leading BOM, which the message still quotes.
+    #[test]
+    fn numeric_literal_column_skips_a_leading_bom_5312() {
+        assert_eq!(
+            EvalError::invalid_numeric_literal("\u{feff}0x10").message,
+            "Invalid numeric literal at EOF at line 1, column 4 (while parsing '\u{feff}0x10')"
+        );
+        assert_eq!(
+            EvalError::invalid_numeric_literal("\u{feff}\u{feff}1").message,
+            "Invalid numeric literal at EOF at line 1, column 4 (while parsing '\u{feff}\u{feff}1')"
+        );
+        assert_eq!(
+            EvalError::invalid_numeric_literal("\u{feff}").message,
+            "Expected JSON value (while parsing '\u{feff}')"
         );
     }
 
